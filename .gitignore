@@ -1,0 +1,19 @@
+# Binaries
+/osapi
+/dist/
+*.exe
+*.test
+*.out
+
+# Go
+/vendor/
+coverage.txt
+coverage.html
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+
+# Local plan/scratch (design docs with local paths — not for the public repo)
+/PLAN.md
