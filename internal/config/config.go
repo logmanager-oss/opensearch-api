@@ -57,7 +57,6 @@ type RetryConfig struct {
 	SuccessStatus  []int // empty => any 2xx
 	TerminalStatus []int // always terminal (default {409})
 	RetryStatus    []int // empty => retry all non-success/non-terminal
-	ExpectEmpty    bool  // sugar: treat 404 as terminal
 }
 
 // Config is the fully resolved runtime configuration.

@@ -3,9 +3,9 @@
 `osapi` is a small, general-purpose CLI for talking to any OpenSearch REST endpoint with robust,
 fully configurable retry behaviour and named connection profiles.
 
-It reproduces the network behaviour of the hand-rolled `curl` bootstrap helper used to configure
-OpenSearch clusters (infinite/bounded retry with backoff, insecure-TLS support, status-code-based
-success/terminal classification), but as a single reusable binary that can hit any endpoint.
+It behaves like a resilient `curl` for OpenSearch: infinite or bounded retry with configurable
+backoff, insecure-TLS support, and status-code-based success/terminal classification — in a single
+reusable binary that can hit any endpoint.
 
 > **Status:** early development. Phase 1 delivers the core CLI (`request` + `profile`); shell
 > completion driven by the bundled OpenSearch OpenAPI spec is planned for a later phase.
@@ -25,7 +25,7 @@ make build
 osapi request --endpoint https://localhost:9200 -k -u admin --method GET --path _cluster/health | jq .
 
 # PUT a body from a file, treating 404 as terminal (exit 1)
-osapi request -X PUT --path _plugins/_ism/policies/my-policy --body @policy.json --expect-empty
+osapi request -X PUT --path _plugins/_ism/policies/my-policy --body @policy.json --terminal-status 409,404
 ```
 
 The response body is written to **stdout** (pipeable to `jq`); human-readable messages and per-attempt
