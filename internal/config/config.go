@@ -1,5 +1,5 @@
 // Package config resolves osapi runtime configuration from flags, environment
-// variables and named profiles, and manages the on-disk profile file.
+// variables and env files.
 package config
 
 import (
@@ -66,7 +66,6 @@ type Config struct {
 	Password   string
 	CACertPath string
 	Insecure   bool
-	Profile    string
 	Retry      RetryConfig
 }
 

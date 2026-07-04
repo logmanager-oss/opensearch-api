@@ -10,14 +10,14 @@ import (
 )
 
 func TestConfigPasswordRedaction(t *testing.T) {
-	cfg := Config{Endpoint: "https://os:9200", Username: "boot", Password: "s3cret"}
+	cfg := Config{Endpoint: "https://os:9200", Username: "admin", Password: "s3cret"}
 
 	for _, verb := range []string{"%v", "%+v", "%#v", "%s"} {
 		out := fmt.Sprintf(verb, cfg)
 		assert.NotContains(t, out, "s3cret", "verb %s leaked password", verb)
 		assert.Contains(t, out, "***", "verb %s missing redaction", verb)
 		assert.Contains(t, out, "https://os:9200", "verb %s dropped endpoint", verb)
-		assert.Contains(t, out, "boot", "verb %s dropped username", verb)
+		assert.Contains(t, out, "admin", "verb %s dropped username", verb)
 	}
 
 	empty := Config{Endpoint: "https://os:9200"}
