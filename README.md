@@ -37,14 +37,11 @@ Each connection setting is resolved as: **explicit flag > environment > profile 
 
 Environment resolution is on by default (disable with `--env=false`). Recognised variables:
 
-| Setting  | Variables (first match wins)                              |
-| -------- | --------------------------------------------------------- |
-| endpoint | `OS_HOST`, `OPENSEARCH_URL`                               |
-| username | `OSAPI_USERNAME`, `OPENSEARCH_USERNAME`                   |
-| password | `OSAPI_PASSWORD`, `OPENSEARCH_PASSWORD`, `OS_<USER>_PASS` |
-
-`OS_<USER>_PASS` derives from the username, uppercased with `-` → `_` (e.g. user `svc-loader` →
-`OS_SVC_LOADER_PASS`).
+| Setting  | Variable              |
+| -------- | --------------------- |
+| endpoint | `OPENSEARCH_URL`      |
+| username | `OPENSEARCH_USERNAME` |
+| password | `OPENSEARCH_PASSWORD` |
 
 ### Profiles
 
