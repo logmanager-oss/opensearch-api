@@ -23,7 +23,6 @@ const (
 	FieldTerminalStatus = "terminal-status"
 	FieldRetryStatus    = "retry-status"
 	FieldSuccessStatus  = "success-status"
-	FieldExpectEmpty    = "expect-empty"
 )
 
 // Sources bundles the inputs to Resolve, decoupled from cobra:
@@ -114,9 +113,6 @@ func applyRetryDefaults(r *RetryConfig, d *RetryDefaults) error {
 	if d.RetryStatus != nil {
 		r.RetryStatus = slices.Clone(d.RetryStatus)
 	}
-	if d.ExpectEmpty != nil {
-		r.ExpectEmpty = *d.ExpectEmpty
-	}
 	return nil
 }
 
@@ -178,9 +174,6 @@ func applyFlags(cfg *Config, s *Sources) {
 	}
 	if s.changed(FieldSuccessStatus) {
 		cfg.Retry.SuccessStatus = slices.Clone(f.Retry.SuccessStatus)
-	}
-	if s.changed(FieldExpectEmpty) {
-		cfg.Retry.ExpectEmpty = f.Retry.ExpectEmpty
 	}
 }
 

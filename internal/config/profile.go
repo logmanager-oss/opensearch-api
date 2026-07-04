@@ -25,7 +25,6 @@ type RetryDefaults struct {
 	SuccessStatus  []int    `yaml:"success_status,omitempty"`
 	TerminalStatus []int    `yaml:"terminal_status,omitempty"`
 	RetryStatus    []int    `yaml:"retry_status,omitempty"`
-	ExpectEmpty    *bool    `yaml:"expect_empty,omitempty"`
 }
 
 // Profile is a persisted named connection. Passwords are never stored.

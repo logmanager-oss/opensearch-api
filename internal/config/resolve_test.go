@@ -224,13 +224,12 @@ func TestResolveRetryFlagsBeatProfile(t *testing.T) {
 	flags.Retry.TerminalStatus = []int{500}
 	flags.Retry.RetryStatus = []int{503}
 	flags.Retry.SuccessStatus = []int{201}
-	flags.Retry.ExpectEmpty = true
 
 	got, err := Resolve(Sources{
 		Flags: flags,
 		Changed: changedSet(FieldMaxAttempts, FieldBackoff, FieldBackoffInitial,
 			FieldBackoffMax, FieldBackoffJitter, FieldTerminalStatus,
-			FieldRetryStatus, FieldSuccessStatus, FieldExpectEmpty),
+			FieldRetryStatus, FieldSuccessStatus),
 		Profile: prof,
 	})
 	require.NoError(t, err)
@@ -242,5 +241,4 @@ func TestResolveRetryFlagsBeatProfile(t *testing.T) {
 	assert.Equal(t, []int{500}, got.Retry.TerminalStatus)
 	assert.Equal(t, []int{503}, got.Retry.RetryStatus)
 	assert.Equal(t, []int{201}, got.Retry.SuccessStatus)
-	assert.True(t, got.Retry.ExpectEmpty)
 }

@@ -81,5 +81,4 @@ func TestDefaults(t *testing.T) {
 	assert.Equal(t, []int{409}, d.Retry.TerminalStatus)
 	assert.Nil(t, d.Retry.SuccessStatus)
 	assert.Nil(t, d.Retry.RetryStatus)
-	assert.False(t, d.Retry.ExpectEmpty)
 }
