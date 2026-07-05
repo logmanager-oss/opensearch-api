@@ -1,0 +1,12 @@
+opensearch-api
+Copyright the opensearch-api authors
+
+This product bundles a preprocessed copy of the OpenSearch API Specification.
+
+  Source:  https://github.com/opensearch-project/opensearch-api-specification
+  License: Apache License 2.0
+  Version: v0.2.0
+  Commit:  a4204f2c1f0a7543d7e01051496aafbced9b03dd
+
+The vendored spec (internal/apispec/spec/) and its Apache-2.0 license text
+(internal/apispec/spec/LICENSE.txt) are used to generate internal/apispec/paths_gen.go.
