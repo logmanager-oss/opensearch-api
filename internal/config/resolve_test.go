@@ -129,46 +129,41 @@ func TestResolveInsecureAndCACert(t *testing.T) {
 
 func TestResolveRetryFlags(t *testing.T) {
 	flags := Defaults()
-	flags.Retry.MaxAttempts = 3
+	flags.Retry.MaxRetries = 3
 	flags.Retry.Strategy = Constant
 	flags.Retry.Initial = 500 * time.Millisecond
 	flags.Retry.Max = 10 * time.Second
 	flags.Retry.Jitter = 0.5
-	flags.Retry.TerminalStatus = []int{500}
-	flags.Retry.RetryStatus = []int{503}
-	flags.Retry.SuccessStatus = []int{201}
+	flags.Retry.AbortOn = []int{400, 409}
 
 	got, err := Resolve(Sources{
 		Flags: flags,
-		Changed: changedSet(FieldMaxAttempts, FieldBackoff, FieldBackoffInitial,
-			FieldBackoffMax, FieldBackoffJitter, FieldTerminalStatus,
-			FieldRetryStatus, FieldSuccessStatus),
+		Changed: changedSet(FieldRetry, FieldBackoff, FieldBackoffInitial,
+			FieldBackoffMax, FieldBackoffJitter, FieldAbortOn),
 	})
 	require.NoError(t, err)
-	assert.Equal(t, 3, got.Retry.MaxAttempts)
+	assert.Equal(t, 3, got.Retry.MaxRetries)
 	assert.Equal(t, Constant, got.Retry.Strategy)
 	assert.Equal(t, 500*time.Millisecond, got.Retry.Initial)
 	assert.Equal(t, 10*time.Second, got.Retry.Max)
 	assert.InDelta(t, 0.5, got.Retry.Jitter, 1e-9)
-	assert.Equal(t, []int{500}, got.Retry.TerminalStatus)
-	assert.Equal(t, []int{503}, got.Retry.RetryStatus)
-	assert.Equal(t, []int{201}, got.Retry.SuccessStatus)
+	assert.Equal(t, []int{400, 409}, got.Retry.AbortOn)
 }
 
 func TestResolveClonesSlices(t *testing.T) {
-	src := []int{503}
+	src := []int{409}
 	flags := Defaults()
-	flags.Retry.RetryStatus = src
+	flags.Retry.AbortOn = src
 
 	got, err := Resolve(Sources{
 		Flags:   flags,
-		Changed: changedSet(FieldRetryStatus),
+		Changed: changedSet(FieldAbortOn),
 	})
 	require.NoError(t, err)
-	require.Equal(t, []int{503}, got.Retry.RetryStatus)
+	require.Equal(t, []int{409}, got.Retry.AbortOn)
 
-	got.Retry.RetryStatus[0] = 999
-	assert.Equal(t, 503, src[0], "resolved slice must not alias the source")
+	got.Retry.AbortOn[0] = 999
+	assert.Equal(t, 409, src[0], "resolved slice must not alias the source")
 }
 
 // TestResolveWithLayeredEnvFile wires the full stack end-to-end: an env file

@@ -49,14 +49,14 @@ func ParseBackoffStrategy(s string) (BackoffStrategy, error) {
 
 // RetryConfig is the resolved retry behaviour for a request.
 type RetryConfig struct {
-	MaxAttempts    int // 0 = infinite
-	Strategy       BackoffStrategy
-	Initial        time.Duration
-	Max            time.Duration
-	Jitter         float64
-	SuccessStatus  []int // empty => any 2xx
-	TerminalStatus []int // always terminal (default {409})
-	RetryStatus    []int // empty => retry all non-success/non-terminal
+	MaxRetries int // number of retries; 0 = no retry (single attempt), <0 = unlimited
+	Strategy   BackoffStrategy
+	Initial    time.Duration
+	Max        time.Duration
+	Jitter     float64
+	// AbortOn lists non-2xx status codes that stop retrying (abort). Empty means
+	// retry every non-2xx response. Any 2xx is always success.
+	AbortOn []int
 }
 
 // Config is the fully resolved runtime configuration.
@@ -102,11 +102,10 @@ const (
 func Defaults() Config {
 	return Config{
 		Retry: RetryConfig{
-			MaxAttempts:    0,
-			Strategy:       Linear,
-			Initial:        defaultInitial,
-			Max:            defaultMax,
-			TerminalStatus: []int{409},
+			MaxRetries: 0, // no retry by default; retrying is opt-in via --retry
+			Strategy:   Linear,
+			Initial:    defaultInitial,
+			Max:        defaultMax,
 		},
 	}
 }

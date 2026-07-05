@@ -56,7 +56,9 @@ func recordingSleep() (func(context.Context, time.Duration) error, *[]time.Durat
 }
 
 func fixedRetryCfg() config.RetryConfig {
-	return config.RetryConfig{Strategy: config.Constant, Initial: time.Second}
+	// MaxRetries: -1 = unlimited, so tests retry until success/terminal unless
+	// they override it.
+	return config.RetryConfig{MaxRetries: -1, Strategy: config.Constant, Initial: time.Second}
 }
 
 func TestEngineDoSuccessAfterRetries(t *testing.T) {
@@ -82,7 +84,7 @@ func TestEngineDoTerminalStatus(t *testing.T) {
 	srv, counter := scriptServer(t, 409)
 	sleep, delays := recordingSleep()
 	cfg := fixedRetryCfg()
-	cfg.TerminalStatus = []int{409}
+	cfg.AbortOn = []int{409}
 	e := New(cfg, WithSleep(sleep))
 
 	resp, err := e.Do(context.Background(), serverAttempt(srv))
@@ -104,7 +106,7 @@ func TestEngineDoTerminalStatus404(t *testing.T) {
 		srv, counter := scriptServer(t, 404)
 		sleep, _ := recordingSleep()
 		cfg := fixedRetryCfg()
-		cfg.TerminalStatus = []int{409, 404}
+		cfg.AbortOn = []int{409, 404}
 		e := New(cfg, WithSleep(sleep))
 
 		resp, err := e.Do(context.Background(), serverAttempt(srv))
@@ -148,17 +150,22 @@ func TestEngineDoTransportErrorThenSuccess(t *testing.T) {
 	assert.Len(t, *delays, 1)
 }
 
-func TestEngineDoMaxAttempts(t *testing.T) {
+func TestEngineDoRetriesExhausted(t *testing.T) {
 	srv, counter := scriptServer(t, 503)
 	sleep, delays := recordingSleep()
 	cfg := fixedRetryCfg()
-	cfg.MaxAttempts = 3
+	cfg.MaxRetries = 2 // 2 retries => 3 attempts total
 	e := New(cfg, WithSleep(sleep))
 
-	resp, err := e.Do(context.Background(), serverAttempt(srv)) //nolint:bodyclose // resp is nil on the max-attempts error path.
+	resp, err := e.Do(context.Background(), serverAttempt(srv))
 	require.Error(t, err)
-	assert.Nil(t, resp)
-	assert.ErrorIs(t, err, ErrMaxAttempts)
+	require.NotNil(t, resp) // final response returned with body open
+	defer func() { _ = resp.Body.Close() }()
+	assert.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
+	body, readErr := io.ReadAll(resp.Body)
+	require.NoError(t, readErr)
+	assert.Equal(t, "attempt 3", string(body))
+	assert.ErrorIs(t, err, ErrRetriesExhausted)
 	assert.Contains(t, err.Error(), "after 3 attempts")
 	assert.Equal(t, int32(3), atomic.LoadInt32(counter))
 	assert.Len(t, *delays, 2)
@@ -218,7 +225,7 @@ func TestEngineDoDrainsRetriedBodies(t *testing.T) {
 
 func TestEngineDoContextCancelMidBackoff(t *testing.T) {
 	srv, counter := scriptServer(t, 503)
-	cfg := config.RetryConfig{Strategy: config.Constant, Initial: 10 * time.Second}
+	cfg := config.RetryConfig{MaxRetries: -1, Strategy: config.Constant, Initial: 10 * time.Second}
 	e := New(cfg) // real context-aware sleep
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -259,7 +266,7 @@ func TestEngineDoDrainsResponseOnContextError(t *testing.T) {
 // Item 4: WithSleep(nil) must fall back to the default sleep, not panic.
 func TestEngineDoNilSleepFallsBack(t *testing.T) {
 	srv, counter := scriptServer(t, 503, 200)
-	cfg := config.RetryConfig{Strategy: config.Constant, Initial: time.Millisecond}
+	cfg := config.RetryConfig{MaxRetries: 1, Strategy: config.Constant, Initial: time.Millisecond}
 	e := New(cfg, WithSleep(nil))
 
 	resp, err := e.Do(context.Background(), serverAttempt(srv))
@@ -295,18 +302,20 @@ func TestEngineDoNoHookWhenCancelledBeforeSleep(t *testing.T) {
 	assert.Equal(t, int32(1), atomic.LoadInt32(&n))
 }
 
-// Item 8: MaxAttempts=1 means exactly one attempt and no retry.
-func TestEngineDoMaxAttemptsOne(t *testing.T) {
+// MaxRetries=0 (the default) means exactly one attempt and no retry.
+func TestEngineDoNoRetry(t *testing.T) {
 	srv, counter := scriptServer(t, 503)
 	sleep, delays := recordingSleep()
 	cfg := fixedRetryCfg()
-	cfg.MaxAttempts = 1
+	cfg.MaxRetries = 0
 	e := New(cfg, WithSleep(sleep))
 
-	resp, err := e.Do(context.Background(), serverAttempt(srv)) //nolint:bodyclose // resp is nil on the max-attempts error path.
+	resp, err := e.Do(context.Background(), serverAttempt(srv))
 	require.Error(t, err)
-	assert.Nil(t, resp)
-	assert.ErrorIs(t, err, ErrMaxAttempts)
+	require.NotNil(t, resp) // single attempt still returns the response body
+	defer func() { _ = resp.Body.Close() }()
+	assert.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
+	assert.ErrorIs(t, err, ErrRetriesExhausted)
 	assert.Contains(t, err.Error(), "after 1 attempts")
 	assert.Equal(t, int32(1), atomic.LoadInt32(counter))
 	assert.Empty(t, *delays)

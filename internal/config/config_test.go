@@ -73,12 +73,10 @@ func TestDefaults(t *testing.T) {
 	assert.Empty(t, d.Password)
 	assert.False(t, d.Insecure)
 
-	assert.Equal(t, 0, d.Retry.MaxAttempts)
+	assert.Equal(t, 0, d.Retry.MaxRetries)
 	assert.Equal(t, Linear, d.Retry.Strategy)
 	assert.Equal(t, 2*time.Second, d.Retry.Initial)
 	assert.Equal(t, 30*time.Second, d.Retry.Max)
 	assert.Zero(t, d.Retry.Jitter)
-	assert.Equal(t, []int{409}, d.Retry.TerminalStatus)
-	assert.Nil(t, d.Retry.SuccessStatus)
-	assert.Nil(t, d.Retry.RetryStatus)
+	assert.Nil(t, d.Retry.AbortOn)
 }
