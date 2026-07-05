@@ -41,35 +41,19 @@ const (
 )
 
 // classify decides the outcome of an attempt from its status and transport
-// error. Precedence: success is checked before terminal, so a 2xx (or a code in
-// SuccessStatus) that also appears in TerminalStatus resolves to Success.
-// Terminal is checked before the retry whitelist, so a code present in both
-// TerminalStatus and RetryStatus resolves to Terminal.
+// error: any 2xx is Success; a status listed in AbortOn is Terminal (stop
+// retrying); everything else (including transport errors) is Retry.
 //
 //nolint:gocritic // hugeParam: RetryConfig passed by value by design (small, immutable).
 func classify(cfg config.RetryConfig, status int, transportErr error) Outcome {
 	if transportErr != nil {
 		return Retry
 	}
-	c := &cfg
-	if isSuccess(c, status) {
+	if status >= statusOK && status < statusMultipleChoice {
 		return Success
 	}
-	if slices.Contains(c.TerminalStatus, status) {
-		return Terminal
-	}
-	if len(c.RetryStatus) > 0 {
-		if slices.Contains(c.RetryStatus, status) {
-			return Retry
-		}
+	if slices.Contains(cfg.AbortOn, status) {
 		return Terminal
 	}
 	return Retry
-}
-
-func isSuccess(cfg *config.RetryConfig, status int) bool {
-	if len(cfg.SuccessStatus) > 0 {
-		return slices.Contains(cfg.SuccessStatus, status)
-	}
-	return status >= statusOK && status < statusMultipleChoice
 }

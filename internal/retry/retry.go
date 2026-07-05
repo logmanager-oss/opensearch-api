@@ -14,10 +14,10 @@ import (
 
 // Sentinel errors returned by Engine.Do, wrapped with context via %w.
 var (
-	// ErrTerminalStatus is returned when a response has a terminal status.
+	// ErrTerminalStatus is returned when a response has a terminal (abort-on) status.
 	ErrTerminalStatus = errors.New("terminal status")
-	// ErrMaxAttempts is returned when the attempt budget is exhausted.
-	ErrMaxAttempts = errors.New("max attempts exhausted")
+	// ErrRetriesExhausted is returned when the retry budget is exhausted.
+	ErrRetriesExhausted = errors.New("retries exhausted")
 )
 
 // Attempt performs a single request. Implementations must honour ctx.
@@ -77,8 +77,9 @@ func New(cfg config.RetryConfig, opts ...Option) *Engine {
 }
 
 // Do runs attempt until success, a terminal status, attempt exhaustion, or
-// context cancellation. On success or terminal status the response body is left
-// open for the caller to read and close; retried bodies are drained and closed.
+// context cancellation. On success, a terminal status, or attempt exhaustion the
+// final response body is left open for the caller to read and close (a transport
+// error leaves it nil); intermediate retried bodies are drained and closed.
 // The Engine and attempt must be non-nil.
 func (e *Engine) Do(ctx context.Context, attempt Attempt) (*http.Response, error) {
 	for n := 1; ; n++ {
@@ -101,14 +102,21 @@ func (e *Engine) Do(ctx context.Context, attempt Attempt) (*http.Response, error
 			return resp, fmt.Errorf("terminal status %d: %w", resp.StatusCode, ErrTerminalStatus)
 		}
 
-		status := drainStatus(resp)
+		// outcome == Retry from here on.
 		if ctxErr := ctx.Err(); ctxErr != nil {
+			drainStatus(resp)
 			return nil, ctxErr
 		}
-		if e.cfg.MaxAttempts > 0 && n >= e.cfg.MaxAttempts {
-			return nil, fmt.Errorf("after %d attempts: %w", n, ErrMaxAttempts)
+		// n attempts done so far means n-1 retries; stop once the retry budget
+		// (MaxRetries, <0 = unlimited) is used up.
+		if e.cfg.MaxRetries >= 0 && n > e.cfg.MaxRetries {
+			// Exhausted: hand the final response back with its body open (like
+			// Terminal) so the caller can still read it. A transport error
+			// leaves resp nil, so there is no body to return.
+			return resp, fmt.Errorf("after %d attempts: %w", n, ErrRetriesExhausted)
 		}
 
+		status := drainStatus(resp)
 		delay := Duration(e.cfg, n, e.jitter)
 		if e.onRetry != nil {
 			e.onRetry(RetryInfo{Attempt: n, Status: status, Err: err, Delay: delay})

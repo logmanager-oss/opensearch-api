@@ -13,14 +13,12 @@ const (
 	FieldPassword       = "password"
 	FieldCACert         = "ca-cert"
 	FieldInsecure       = "insecure"
-	FieldMaxAttempts    = "max-attempts"
+	FieldRetry          = "retry"
 	FieldBackoff        = "backoff"
 	FieldBackoffInitial = "backoff-initial"
 	FieldBackoffMax     = "backoff-max"
 	FieldBackoffJitter  = "backoff-jitter"
-	FieldTerminalStatus = "terminal-status"
-	FieldRetryStatus    = "retry-status"
-	FieldSuccessStatus  = "success-status"
+	FieldAbortOn        = "abort-on"
 )
 
 // Sources bundles the inputs to Resolve, decoupled from cobra:
@@ -76,8 +74,8 @@ func applyFlags(cfg *Config, s *Sources) {
 	if s.changed(FieldInsecure) {
 		cfg.Insecure = f.Insecure
 	}
-	if s.changed(FieldMaxAttempts) {
-		cfg.Retry.MaxAttempts = f.Retry.MaxAttempts
+	if s.changed(FieldRetry) {
+		cfg.Retry.MaxRetries = f.Retry.MaxRetries
 	}
 	if s.changed(FieldBackoff) {
 		cfg.Retry.Strategy = f.Retry.Strategy
@@ -91,14 +89,8 @@ func applyFlags(cfg *Config, s *Sources) {
 	if s.changed(FieldBackoffJitter) {
 		cfg.Retry.Jitter = f.Retry.Jitter
 	}
-	if s.changed(FieldTerminalStatus) {
-		cfg.Retry.TerminalStatus = slices.Clone(f.Retry.TerminalStatus)
-	}
-	if s.changed(FieldRetryStatus) {
-		cfg.Retry.RetryStatus = slices.Clone(f.Retry.RetryStatus)
-	}
-	if s.changed(FieldSuccessStatus) {
-		cfg.Retry.SuccessStatus = slices.Clone(f.Retry.SuccessStatus)
+	if s.changed(FieldAbortOn) {
+		cfg.Retry.AbortOn = slices.Clone(f.Retry.AbortOn)
 	}
 }
 
