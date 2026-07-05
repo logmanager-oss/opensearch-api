@@ -1,5 +1,5 @@
 // Command osapi is a general-purpose CLI for talking to OpenSearch REST
-// endpoints with configurable retry and named connection profiles.
+// endpoints with configurable retry.
 package main
 
 import "fmt"

@@ -1,14 +1,12 @@
 package config
 
 import (
-	"fmt"
 	"slices"
-	"time"
 )
 
 // Field names identify flags that were explicitly set. The CLI layer wires
-// these to cobra's flags.Changed so Resolve can apply flag > env > profile >
-// default precedence per field.
+// these to cobra's flags.Changed so Resolve can apply flag > env > default
+// precedence per field.
 const (
 	FieldEndpoint       = "endpoint"
 	FieldUsername       = "username"
@@ -29,14 +27,12 @@ const (
 //   - Flags carries the flag-provided values.
 //   - Changed reports whether a given field (see Field* constants) was set on
 //     the command line; nil means nothing was set.
-//   - Env is the environment lookup, consulted only when UseEnv is true.
-//   - Profile is the selected named profile, or nil.
+//   - Env is the environment lookup, always consulted. Layer an env file over
+//     the process environment with LayeredEnv.
 type Sources struct {
 	Flags   Config
 	Changed func(field string) bool
 	Env     EnvLookup
-	UseEnv  bool
-	Profile *Profile
 }
 
 func (s *Sources) changed(field string) bool {
@@ -44,88 +40,17 @@ func (s *Sources) changed(field string) bool {
 }
 
 // Resolve merges the sources into a final Config using per-field precedence
-// explicit flag > env (when UseEnv) > profile > default. Passwords are resolved
-// from flag/env only, never from a profile.
+// explicit flag > env > default.
 //
 //nolint:gocritic // Sources is the documented value-typed public API.
 func Resolve(s Sources) (Config, error) {
 	cfg := Defaults()
 
-	if s.Profile != nil {
-		if err := applyProfile(&cfg, s.Profile); err != nil {
-			return Config{}, err
-		}
-	}
-	if s.UseEnv {
-		applyEnv(&cfg, s.Env)
-	}
+	applyEnv(&cfg, s.Env)
 	applyFlags(&cfg, &s)
 	resolvePasswordSource(&cfg, &s)
 
 	return cfg, nil
-}
-
-func applyProfile(cfg *Config, p *Profile) error {
-	if p.Endpoint != "" {
-		cfg.Endpoint = p.Endpoint
-	}
-	if p.Username != "" {
-		cfg.Username = p.Username
-	}
-	if p.CACertPath != "" {
-		cfg.CACertPath = p.CACertPath
-	}
-	if p.Insecure {
-		cfg.Insecure = true
-	}
-	return applyRetryDefaults(&cfg.Retry, p.Retry)
-}
-
-func applyRetryDefaults(r *RetryConfig, d *RetryDefaults) error {
-	if d == nil {
-		return nil
-	}
-	if d.MaxAttempts != nil {
-		r.MaxAttempts = *d.MaxAttempts
-	}
-	if d.Strategy != nil {
-		parsed, err := ParseBackoffStrategy(*d.Strategy)
-		if err != nil {
-			return fmt.Errorf("profile retry strategy: %w", err)
-		}
-		r.Strategy = parsed
-	}
-	if err := applyDuration(&r.Initial, d.Initial, "initial"); err != nil {
-		return err
-	}
-	if err := applyDuration(&r.Max, d.Max, "max"); err != nil {
-		return err
-	}
-	if d.Jitter != nil {
-		r.Jitter = *d.Jitter
-	}
-	if d.SuccessStatus != nil {
-		r.SuccessStatus = slices.Clone(d.SuccessStatus)
-	}
-	if d.TerminalStatus != nil {
-		r.TerminalStatus = slices.Clone(d.TerminalStatus)
-	}
-	if d.RetryStatus != nil {
-		r.RetryStatus = slices.Clone(d.RetryStatus)
-	}
-	return nil
-}
-
-func applyDuration(dst *time.Duration, val *string, name string) error {
-	if val == nil {
-		return nil
-	}
-	d, err := time.ParseDuration(*val)
-	if err != nil {
-		return fmt.Errorf("profile retry %s duration %q: %w", name, *val, err)
-	}
-	*dst = d
-	return nil
 }
 
 func applyEnv(cfg *Config, env EnvLookup) {
@@ -177,13 +102,10 @@ func applyFlags(cfg *Config, s *Sources) {
 	}
 }
 
-// resolvePasswordSource resolves the password from env then flag; a profile
-// never supplies a password.
+// resolvePasswordSource resolves the password from env then flag.
 func resolvePasswordSource(cfg *Config, s *Sources) {
-	if s.UseEnv {
-		if v, ok := envPassword(s.Env); ok {
-			cfg.Password = v
-		}
+	if v, ok := envPassword(s.Env); ok {
+		cfg.Password = v
 	}
 	if s.changed(FieldPassword) {
 		cfg.Password = s.Flags.Password
