@@ -17,3 +17,6 @@ coverage.html
 
 # Local plan/scratch (design docs with local paths — not for the public repo)
 /PLAN.md
+
+# Vendored spec fetched on demand by `make update-spec`; only paths_gen.go is committed
+/internal/apispec/spec/opensearch-openapi.yaml
