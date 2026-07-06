@@ -70,6 +70,7 @@ func NewRootCommand(version string) *cobra.Command {
 	f.IntSliceVar(&qf.abortOn, config.FieldAbortOn, nil,
 		"status codes that stop retrying; comma-separated; only meaningful with --retry")
 
+	registerCompletion(root, qf)
 	_ = root.MarkFlagRequired("path")
 	return root
 }
