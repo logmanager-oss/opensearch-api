@@ -11,10 +11,15 @@ diagnostics and per-attempt retry detail go to **stderr**.
 ## Install
 
 ```sh
-go build -o osapi ./cmd/osapi
-# or
-make build
+# Latest release, straight from GitHub (installs onto $(go env GOPATH)/bin):
+go install github.com/logmanager-oss/opensearch-api/cmd/osapi@latest
+
+# Or from a local checkout:
+go install ./cmd/osapi          # onto your PATH
+go build -o osapi ./cmd/osapi   # local binary in the repo dir (or: make build)
 ```
+
+Shell completion (below) needs `osapi` on your `PATH`, so prefer `go install`.
 
 ## Usage
 
@@ -31,6 +36,9 @@ osapi -X PUT --path _plugins/_ism/policies/my-policy \
 
 # Read the body from stdin
 echo '{"query":{"match_all":{}}}' | osapi -X POST --path my-index/_search -d @-
+
+# Scaffold a request body for an endpoint, then fill it in
+osapi -X POST --path _search --body-skeleton
 ```
 
 ### Flags
@@ -47,6 +55,7 @@ echo '{"query":{"match_all":{}}}' | osapi -X POST --path my-index/_search -d @-
 | `-X, --method`       | `GET`     | HTTP method                                                       |
 | `--path`             | required  | request path, e.g. `_cluster/health`                             |
 | `-d, --body`         |           | request body: literal string, `@file`, or `@-` for stdin         |
+| `--body-skeleton`    |           | print a JSON request-body template for `--path`/`-X` and exit     |
 | `-q, --query`        |           | query parameter as `key=value` (repeatable)                      |
 | `-H, --header`       |           | request header as `"Key: Value"` (repeatable)                    |
 | `--retry`            | `0`       | number of retries (`0` = none; `-1` = unlimited)                 |
@@ -55,6 +64,24 @@ echo '{"query":{"match_all":{}}}' | osapi -X POST --path my-index/_search -d @-
 | `--backoff-initial`  | `2s`      | initial backoff delay                                            |
 | `--backoff-max`      | `30s`     | maximum backoff delay                                            |
 | `--backoff-jitter`   | `0`       | backoff jitter as a fraction in `[0,1)`                          |
+
+## Shell completion
+
+`osapi` ships completion driven by a pinned OpenSearch OpenAPI spec (compiled into the binary — no
+runtime spec parsing). Load it for your shell:
+
+```sh
+source <(osapi completion bash)   # or: zsh, fish
+```
+
+- `--path` completes the documented REST surface, one path segment at a time, and is narrowed by
+  the method when `-X` is set. Path parameters surface as literal hints (e.g. `{index}`) — real
+  index/policy names are not looked up.
+- `--method` completes the verbs valid for the typed `--path`.
+
+`--body-skeleton` uses the same spec to print a typed, top-level JSON body template for the chosen
+`--path`/`-X` (object bodies only; nested fields are left empty). Run `make update-spec` to refresh
+the vendored spec.
 
 ## Configuration precedence
 
