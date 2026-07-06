@@ -6,6 +6,11 @@ updates:
     schedule:
       interval: weekly
 
+  - package-ecosystem: gomod
+    directory: /internal/apispec/gen
+    schedule:
+      interval: weekly
+
   - package-ecosystem: github-actions
     directory: /
     schedule:

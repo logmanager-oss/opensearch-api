@@ -2,7 +2,7 @@
 // HTTP methods, generated from a pinned OpenAPI spec.
 package apispec
 
-//go:generate go run gen/main.go
+//go:generate go -C gen run .
 
 import (
 	"sort"
