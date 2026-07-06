@@ -171,6 +171,25 @@ func TestEngineDoRetriesExhausted(t *testing.T) {
 	assert.Len(t, *delays, 2)
 }
 
+func TestEngineDoTransportErrorExhaustedWrapsCause(t *testing.T) {
+	sleep, delays := recordingSleep()
+	cfg := fixedRetryCfg()
+	cfg.MaxRetries = 2 // 2 retries => 3 attempts total
+	e := New(cfg, WithSleep(sleep))
+
+	cause := errors.New("dial tcp: connection refused")
+	attempt := func(context.Context) (*http.Response, error) { return nil, cause }
+
+	resp, err := e.Do(context.Background(), attempt) //nolint:bodyclose // transport error returns a nil response
+	require.Error(t, err)
+	assert.Nil(t, resp)                         // transport error leaves no response
+	assert.ErrorIs(t, err, ErrRetriesExhausted) // sentinel still matchable
+	assert.ErrorIs(t, err, cause)               // transport cause surfaced
+	assert.Contains(t, err.Error(), "after 3 attempts")
+	assert.Contains(t, err.Error(), "connection refused")
+	assert.Len(t, *delays, 2)
+}
+
 func TestEngineDoOnRetryHook(t *testing.T) {
 	srv, _ := scriptServer(t, 503, 503, 200)
 	sleep, _ := recordingSleep()
