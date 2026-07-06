@@ -53,6 +53,8 @@ func NewRootCommand(version string) *cobra.Command {
 	f.StringVar(&qf.path, "path", "", "request path, e.g. _cluster/health")
 	f.StringVarP(&qf.body, "body", "d", "",
 		"request body: a literal string, @file to read a file, or @- to read stdin")
+	f.BoolVar(&qf.bodySkeleton, "body-skeleton", false,
+		"print a JSON request-body template for --path/-X and exit")
 	f.StringArrayVarP(&qf.query, "query", "q", nil,
 		"query parameter as key=value (repeatable)")
 	f.StringArrayVarP(&qf.header, "header", "H", nil,

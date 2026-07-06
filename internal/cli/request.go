@@ -31,6 +31,7 @@ type requestFlags struct {
 	method         string
 	path           string
 	body           string
+	bodySkeleton   bool
 	query          []string
 	header         []string
 	retry          int
@@ -42,6 +43,10 @@ type requestFlags struct {
 }
 
 func runRequest(cmd *cobra.Command, qf *requestFlags) error {
+	if qf.bodySkeleton {
+		return printBodySkeleton(cmd.OutOrStdout(), cmd.ErrOrStderr(), qf.path, qf.method)
+	}
+
 	ctx := cmd.Context()
 
 	cfg, err := resolveConfig(cmd, qf)
