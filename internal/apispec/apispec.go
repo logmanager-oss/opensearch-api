@@ -5,6 +5,7 @@ package apispec
 //go:generate go -C gen run .
 
 import (
+	"encoding/json"
 	"sort"
 	"strings"
 )
@@ -13,6 +14,105 @@ import (
 type Endpoint struct {
 	Template string
 	Methods  []string
+}
+
+// BodyField is a top-level request-body property and its JSON type ("" when the
+// type is composed or otherwise not a single scalar type).
+type BodyField struct {
+	Name string
+	Type string
+}
+
+// MatchTemplate maps a concrete path (leading slash optional) to a spec template
+// in Paths, matching segment-for-segment where a {param} segment is a wildcard.
+// The match with the fewest params (most literal) wins; the returned template
+// keeps its leading slash so it composes with a Bodies key.
+func MatchTemplate(path string) (string, bool) {
+	path = strings.TrimPrefix(path, "/")
+	if path == "" {
+		return "", false
+	}
+	segs := strings.Split(path, "/")
+	best := ""
+	bestParams := -1
+	for _, ep := range Paths {
+		tsegs := strings.Split(strings.TrimPrefix(ep.Template, "/"), "/")
+		if len(tsegs) != len(segs) {
+			continue
+		}
+		params, match := 0, true
+		for i, ts := range tsegs {
+			if strings.HasPrefix(ts, "{") && strings.HasSuffix(ts, "}") {
+				params++
+				continue
+			}
+			if ts != segs[i] {
+				match = false
+				break
+			}
+		}
+		if !match {
+			continue
+		}
+		// Fewest params wins; ties resolve to the first (sorted) Paths entry.
+		// Overlapping OpenSearch templates differ by literal segments, so at most
+		// one matches any concrete path — a tie never arises in practice.
+		if bestParams == -1 || params < bestParams {
+			best, bestParams = ep.Template, params
+		}
+	}
+	if bestParams == -1 {
+		return "", false
+	}
+	return best, true
+}
+
+// BodySkeleton returns a pretty-printed, top-level JSON request-body scaffold for
+// the given path and method, preserving spec field order. ok is false when the
+// path matches no template or the operation has no object body with named
+// top-level fields (array and free-form bodies are not scaffolded).
+func BodySkeleton(path, method string) (string, bool) {
+	tmpl, ok := MatchTemplate(path)
+	if !ok {
+		return "", false
+	}
+	fields, ok := Bodies[strings.ToUpper(method)+" "+tmpl]
+	if !ok {
+		return "", false
+	}
+
+	var sb strings.Builder
+	sb.WriteString("{\n")
+	for i, f := range fields {
+		name, _ := json.Marshal(f.Name) // json-escape the key; never errors for a string
+		sb.WriteString("  ")
+		sb.Write(name)
+		sb.WriteString(": ")
+		sb.WriteString(placeholder(f.Type))
+		if i < len(fields)-1 {
+			sb.WriteByte(',')
+		}
+		sb.WriteByte('\n')
+	}
+	sb.WriteByte('}')
+	return sb.String(), true
+}
+
+func placeholder(typ string) string {
+	switch typ {
+	case "string":
+		return `""`
+	case "integer", "number":
+		return "0"
+	case "boolean":
+		return "false"
+	case "object":
+		return "{}"
+	case "array":
+		return "[]"
+	default:
+		return "null"
+	}
 }
 
 // Suggest returns hierarchical, segment-at-a-time completions for the --path

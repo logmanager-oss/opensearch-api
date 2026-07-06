@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -352,4 +353,24 @@ func writeEnvFile(t *testing.T, content string) string {
 	path := filepath.Join(t.TempDir(), "creds.env")
 	require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
 	return path
+}
+
+func TestRequestBodySkeleton(t *testing.T) {
+	// No --endpoint is set: the flag must short-circuit before any network use.
+	t.Run("prints scaffold and sends no request", func(t *testing.T) {
+		stdout, stderr, err := run(t, nil,
+			"--path", "_search", "-X", "POST", "--body-skeleton")
+		require.NoError(t, err)
+		assert.True(t, json.Valid([]byte(stdout)), "stdout must be valid JSON: %s", stdout)
+		assert.Contains(t, stdout, `"query"`)
+		assert.Empty(t, stderr)
+	})
+
+	t.Run("no field template prints {} and a note", func(t *testing.T) {
+		stdout, stderr, err := run(t, nil,
+			"--path", "_cluster/health", "--body-skeleton")
+		require.NoError(t, err)
+		assert.Equal(t, "{}\n", stdout)
+		assert.Contains(t, stderr, "no top-level field template")
+	})
 }
