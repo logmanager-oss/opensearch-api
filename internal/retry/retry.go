@@ -111,8 +111,13 @@ func (e *Engine) Do(ctx context.Context, attempt Attempt) (*http.Response, error
 		// (MaxRetries, <0 = unlimited) is used up.
 		if e.cfg.MaxRetries >= 0 && n > e.cfg.MaxRetries {
 			// Exhausted: hand the final response back with its body open (like
-			// Terminal) so the caller can still read it. A transport error
-			// leaves resp nil, so there is no body to return.
+			// Terminal) so the caller can still read it. A transport error leaves
+			// resp nil (no body), so surface its cause in the chain — both
+			// ErrRetriesExhausted and the transport error stay errors.Is-matchable.
+			if err != nil {
+				drainStatus(resp) // nil on a transport error, but never leak a body if one is returned
+				return nil, fmt.Errorf("after %d attempts: %w: %w", n, ErrRetriesExhausted, err)
+			}
 			return resp, fmt.Errorf("after %d attempts: %w", n, ErrRetriesExhausted)
 		}
 
