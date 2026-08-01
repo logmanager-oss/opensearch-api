@@ -53,3 +53,23 @@ jobs:
 
       - name: Check for vulnerabilities
         run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
+  e2e:
+    name: E2E
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0
+        with:
+          go-version-file: go.mod
+
+      - name: Raise vm.max_map_count
+        run: sudo sysctl -w vm.max_map_count=262144
+
+      - name: E2E tests
+        run: make e2e
