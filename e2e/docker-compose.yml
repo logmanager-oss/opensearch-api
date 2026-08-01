@@ -1,0 +1,30 @@
+name: osapi-e2e
+services:
+  opensearch:
+    image: ${E2E_OPENSEARCH_IMAGE:-opensearchproject/opensearch:2.19.4}
+    environment:
+      - DISABLE_INSTALL_DEMO_CONFIG=true
+      - OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    ports:
+      - "127.0.0.1:${E2E_OPENSEARCH_PORT:-19200}:9200"
+    volumes:
+      - ./opensearch.yml:/usr/share/opensearch/config/opensearch.yml:ro
+      - ./certs:/usr/share/opensearch/config/certs:ro
+      - ./securityconfig/internal_users.yml:/usr/share/opensearch/config/opensearch-security/internal_users.yml:ro
+      - ./securityconfig/roles.yml:/usr/share/opensearch/config/opensearch-security/roles.yml:ro
+      - ./securityconfig/roles_mapping.yml:/usr/share/opensearch/config/opensearch-security/roles_mapping.yml:ro
+    healthcheck:
+      # Authenticated --fail absorbs the security-index-init 503 window: the
+      # request only succeeds once the security plugin has finished bootstrapping.
+      test: ["CMD-SHELL", "curl -sk --fail -u 'admin:E2e-Test-Only-Admin-Pw!' https://localhost:9200/_cluster/health"]
+      interval: 2s
+      timeout: 5s
+      retries: 90
+      start_period: 15s

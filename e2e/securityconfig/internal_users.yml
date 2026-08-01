@@ -1,0 +1,41 @@
+---
+# =============================================================================
+# SYNTHETIC E2E FIXTURE - NOT FOR PRODUCTION USE
+#
+# These are throwaway credentials for a local, disposable OpenSearch container
+# used only by this repo's end-to-end tests. They are never valid outside a
+# freshly-started `make e2e-up` stack.
+#
+# Hashes below were generated with the image's own hash tool (2.x requires the
+# $2y$ bcrypt variant):
+#
+#   docker run --rm opensearchproject/opensearch:2.19.4 \
+#     plugins/opensearch-security/tools/hash.sh -p '<password>'
+#
+# Regenerate by re-running that command for each password below and pasting
+# the resulting hash in place of the `hash` value.
+# =============================================================================
+
+_meta:
+  type: "internalusers"
+  config_version: 2
+
+# password: E2e-Test-Only-Admin-Pw!
+admin:
+  hash: "$2y$12$MUk5GTJ2Z6to6RjBzo2Lv.59wkDYaQF0YmiRTysqO7u04lQGcbzBq"
+  backend_roles:
+    - "admin"
+  description: "e2e fixture - full access via all_access"
+
+# password: E2e-Test-Only-Reader-Pw!
+ci_reader:
+  hash: "$2y$12$m1m.Xdd2LohT8unOei/k.Op3DljMdItSMYCKQtc0MyTCuSZ9SK0mq"
+  backend_roles:
+    - "ci_reader"
+  description: "e2e fixture - read-only via ci_read_only"
+
+# password: E2e-Test-Only-Locked-Pw!
+ci_locked:
+  hash: "$2y$12$PjFW/fVxxY5HqsrzNF6ZVeRED3b0XJj84noNfIV4z6jmsUcrsDcri"
+  backend_roles: []
+  description: "e2e fixture - authenticates but is mapped to no role (expect 403)"

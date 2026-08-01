@@ -132,6 +132,7 @@ one; on a non-interactive terminal it fails instead of hanging.
 make test   # go test ./...
 make lint   # golangci-lint run
 make build  # build the osapi binary
+make e2e    # end-to-end suite against a real OpenSearch (needs Docker); see e2e/README.md
 ```
 
 ## License
