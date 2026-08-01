@@ -3,7 +3,11 @@ PKG := ./cmd/osapi
 SPEC_VERSION := v0.2.0
 SPEC_URL := https://github.com/opensearch-project/opensearch-api-specification/releases/download/$(SPEC_VERSION)
 
-.PHONY: build test lint generate tidy fmt clean update-spec
+E2E_COMPOSE := docker compose -f e2e/docker-compose.yml
+E2E_OPENSEARCH_PORT ?= 19200
+export E2E_OPENSEARCH_PORT
+
+.PHONY: build test lint generate tidy fmt clean update-spec e2e-up e2e-down
 
 build:
 	go build -o $(BINARY) $(PKG)
@@ -33,3 +37,13 @@ fmt:
 clean:
 	rm -f $(BINARY)
 	go clean
+
+# e2e-up always tears down first: a fresh stack means certs on disk always
+# match the running container.
+e2e-up:
+	$(E2E_COMPOSE) down -v
+	sh e2e/gen-certs.sh e2e/certs
+	$(E2E_COMPOSE) up --wait
+
+e2e-down:
+	$(E2E_COMPOSE) down -v

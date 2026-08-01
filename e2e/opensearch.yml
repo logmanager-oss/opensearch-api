@@ -1,0 +1,23 @@
+---
+# Mounted over the image's shipped config/opensearch.yml for the e2e stack.
+# This is a throwaway, single-node, security-enabled configuration - not a
+# template for production deployments.
+
+cluster.name: osapi-e2e
+network.host: 0.0.0.0
+discovery.type: single-node
+
+plugins.security.ssl.http.enabled: true
+plugins.security.ssl.http.pemcert_filepath: certs/node.pem
+plugins.security.ssl.http.pemkey_filepath: certs/node-key.pem
+plugins.security.ssl.http.pemtrustedcas_filepath: certs/ca.pem
+
+plugins.security.ssl.transport.pemcert_filepath: certs/node.pem
+plugins.security.ssl.transport.pemkey_filepath: certs/node-key.pem
+plugins.security.ssl.transport.pemtrustedcas_filepath: certs/ca.pem
+plugins.security.ssl.transport.enforce_hostname_verification: false
+
+plugins.security.nodes_dn:
+  - "CN=node,O=osapi-e2e"
+
+plugins.security.allow_default_init_securityindex: true

@@ -1,0 +1,22 @@
+---
+# =============================================================================
+# SYNTHETIC E2E FIXTURE - NOT FOR PRODUCTION USE
+#
+# Throwaway user-to-role mappings for a local, disposable OpenSearch container
+# used only by this repo's end-to-end tests.
+# =============================================================================
+
+_meta:
+  type: "rolesmapping"
+  config_version: 2
+
+all_access:
+  backend_roles:
+    - "admin"
+
+ci_read_only:
+  backend_roles:
+    - "ci_reader"
+
+# ci_locked is intentionally mapped to nothing: it authenticates but has no
+# permissions, so every request it makes must come back 403.

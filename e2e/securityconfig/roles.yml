@@ -1,0 +1,23 @@
+---
+# =============================================================================
+# SYNTHETIC E2E FIXTURE - NOT FOR PRODUCTION USE
+#
+# Throwaway role definitions for a local, disposable OpenSearch container used
+# only by this repo's end-to-end tests. `all_access`, `read` and
+# `cluster_monitor` are static/compiled-in action groups and roles shipped by
+# the security plugin - only `ci_read_only` below is custom to this stack.
+# =============================================================================
+
+_meta:
+  type: "roles"
+  config_version: 2
+
+ci_read_only:
+  cluster_permissions:
+    - "cluster_monitor"
+  index_permissions:
+    - index_patterns:
+        - "*"
+      allowed_actions:
+        - "read"
+        - "indices:monitor/*"
