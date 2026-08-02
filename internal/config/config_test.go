@@ -129,3 +129,28 @@ func TestParseSize(t *testing.T) {
 		})
 	}
 }
+
+func TestFormatSize(t *testing.T) {
+	tests := []struct {
+		name  string
+		input int64
+		want  string
+	}{
+		{name: "bytes", input: 512, want: "512B"},
+		{name: "zero", input: 0, want: "0B"},
+		{name: "KiB", input: 10 * 1024, want: "10KiB"},
+		{name: "MiB", input: 10 * 1024 * 1024, want: "10MiB"},
+		{name: "GiB", input: 2 * 1024 * 1024 * 1024, want: "2GiB"},
+		{name: "non-multiple stays bytes", input: 1025, want: "1025B"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := FormatSize(tt.input)
+			assert.Equal(t, tt.want, got)
+
+			parsed, err := ParseSize(got)
+			require.NoError(t, err)
+			assert.Equal(t, tt.input, parsed, "FormatSize output must round-trip through ParseSize")
+		})
+	}
+}

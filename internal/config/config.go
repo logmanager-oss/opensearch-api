@@ -184,3 +184,18 @@ func ParseSize(s string) (int64, error) {
 
 	return n * mult, nil
 }
+
+// FormatSize renders n bytes using the largest unit of ParseSize's grammar
+// that divides it evenly, so a parsed size round-trips to its input form.
+func FormatSize(n int64) string {
+	switch {
+	case n >= bytesPerGiB && n%bytesPerGiB == 0:
+		return strconv.FormatInt(n/bytesPerGiB, 10) + "GiB"
+	case n >= bytesPerMiB && n%bytesPerMiB == 0:
+		return strconv.FormatInt(n/bytesPerMiB, 10) + "MiB"
+	case n >= bytesPerKiB && n%bytesPerKiB == 0:
+		return strconv.FormatInt(n/bytesPerKiB, 10) + "KiB"
+	default:
+		return strconv.FormatInt(n, 10) + "B"
+	}
+}
