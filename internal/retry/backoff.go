@@ -33,10 +33,7 @@ func Duration(cfg config.RetryConfig, attempt int, jitter func() float64) time.D
 	fraction := clampUnit(cfg.Jitter)
 	sample := clampUnit(jitter())
 	factor := 1 - fraction + sample*2*fraction
-	d = time.Duration(float64(d) * factor)
-	if d < 0 {
-		d = 0
-	}
+	d = max(time.Duration(float64(d)*factor), 0)
 	return clampMax(cfg.Max, d)
 }
 

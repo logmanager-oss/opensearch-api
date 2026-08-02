@@ -1,10 +1,12 @@
 package retry
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"math/rand"
 	"net/http"
 	"time"
@@ -29,15 +31,19 @@ type RetryInfo struct {
 	Status  int           // response status, or 0 on transport error
 	Err     error         // transport error, or nil
 	Delay   time.Duration // backoff before the next attempt
+	Reason  string        // classification reason (e.g. "--retry-when matched"); "" for plain status classification
 }
 
 // Engine drives a retry loop with configurable outcome classification and
 // backoff. It is safe for reuse across calls.
 type Engine struct {
-	cfg     config.RetryConfig
-	sleep   func(context.Context, time.Duration) error
-	jitter  func() float64
-	onRetry func(RetryInfo)
+	cfg         config.RetryConfig
+	sleep       func(context.Context, time.Duration) error
+	jitter      func() float64
+	onRetry     func(RetryInfo)
+	retryWhen   *Predicate
+	successWhen *Predicate
+	warn        io.Writer
 }
 
 // Option configures an Engine.
@@ -59,6 +65,28 @@ func WithOnRetry(fn func(RetryInfo)) Option {
 	return func(e *Engine) { e.onRetry = fn }
 }
 
+// WithRetryWhen sets the compiled --retry-when predicate (nil disables it).
+func WithRetryWhen(p *Predicate) Option {
+	return func(e *Engine) { e.retryWhen = p }
+}
+
+// WithSuccessWhen sets the compiled --success-when predicate (nil disables it).
+func WithSuccessWhen(p *Predicate) Option {
+	return func(e *Engine) { e.successWhen = p }
+}
+
+// WithWarn sets the writer for per-attempt predicate warnings (defaults to io.Discard).
+func WithWarn(w io.Writer) Option {
+	return func(e *Engine) { e.warn = w }
+}
+
+// hasPredicates reports whether any body predicate is configured — the gate
+// for buffering bodies in Do and for evaluating predicates in classify, which
+// must always agree.
+func (e *Engine) hasPredicates() bool {
+	return e.retryWhen != nil || e.successWhen != nil
+}
+
 // New builds an Engine for cfg with the given options.
 //
 //nolint:gocritic // hugeParam: RetryConfig passed by value by design (small, immutable).
@@ -73,26 +101,52 @@ func New(cfg config.RetryConfig, opts ...Option) *Engine {
 	if e.jitter == nil {
 		e.jitter = rand.Float64 // top-level source: auto-seeded and goroutine-safe.
 	}
+	if e.warn == nil {
+		e.warn = io.Discard
+	}
 	return e
 }
 
 // Do runs attempt until success, a terminal status, attempt exhaustion, or
 // context cancellation. On success, a terminal status, or attempt exhaustion the
 // final response body is left open for the caller to read and close (a transport
-// error leaves it nil); intermediate retried bodies are drained and closed.
-// The Engine and attempt must be non-nil.
+// error, or a failure reading the body for predicate evaluation, leaves it nil);
+// intermediate retried bodies are drained and closed (bodies buffered for
+// predicate evaluation just close: the socket is at EOF, or deliberately
+// abandoned when over-cap rather than draining a possibly huge remainder). Attempt
+// exhaustion wraps the final classification reason (e.g. "--success-when not
+// satisfied") when one applies. The Engine and attempt must be non-nil.
 func (e *Engine) Do(ctx context.Context, attempt Attempt) (*http.Response, error) {
 	for n := 1; ; n++ {
 		resp, err := attempt(ctx)
 
-		outcome := Retry
+		var body []byte
+		var buffered, overflowed bool
+		if err == nil && e.hasPredicates() {
+			body, overflowed, err = bufferBody(resp, e.cfg.MaxBodyBuffer)
+			buffered = err == nil
+			if err != nil {
+				_ = resp.Body.Close()
+				resp = nil
+				err = fmt.Errorf("reading response body: %w", err)
+			}
+		}
+
 		if err != nil {
 			if ctxErr := contextError(ctx, err); ctxErr != nil {
 				drainStatus(resp) // never leak a response returned alongside a ctx error
 				return nil, ctxErr
 			}
-		} else {
-			outcome = classify(e.cfg, resp.StatusCode, nil)
+		}
+
+		respStatus := 0
+		if resp != nil {
+			respStatus = resp.StatusCode
+		}
+		outcome, reason, ctxErr := e.classify(ctx, respStatus, body, overflowed, err)
+		if ctxErr != nil {
+			closeAttempt(resp, buffered)
+			return nil, ctxErr
 		}
 
 		switch outcome {
@@ -104,27 +158,31 @@ func (e *Engine) Do(ctx context.Context, attempt Attempt) (*http.Response, error
 
 		// outcome == Retry from here on.
 		if ctxErr := ctx.Err(); ctxErr != nil {
-			drainStatus(resp)
+			closeAttempt(resp, buffered)
 			return nil, ctxErr
 		}
 		// n attempts done so far means n-1 retries; stop once the retry budget
 		// (MaxRetries, <0 = unlimited) is used up.
 		if e.cfg.MaxRetries >= 0 && n > e.cfg.MaxRetries {
 			// Exhausted: hand the final response back with its body open (like
-			// Terminal) so the caller can still read it. A transport error leaves
-			// resp nil (no body), so surface its cause in the chain — both
-			// ErrRetriesExhausted and the transport error stay errors.Is-matchable.
+			// Terminal) so the caller can still read it. A transport (or
+			// body-read) error leaves resp nil (no body), so surface its cause in
+			// the chain — both ErrRetriesExhausted and the cause stay
+			// errors.Is-matchable.
 			if err != nil {
-				drainStatus(resp) // nil on a transport error, but never leak a body if one is returned
+				drainStatus(resp) // nil on a transport/body-read error, but never leak a body if one is returned
 				return nil, fmt.Errorf("after %d attempts: %w: %w", n, ErrRetriesExhausted, err)
+			}
+			if reason != "" {
+				return resp, fmt.Errorf("after %d attempts: %w: %s", n, ErrRetriesExhausted, reason)
 			}
 			return resp, fmt.Errorf("after %d attempts: %w", n, ErrRetriesExhausted)
 		}
 
-		status := drainStatus(resp)
+		status := closeAttempt(resp, buffered)
 		delay := Duration(e.cfg, n, e.jitter)
 		if e.onRetry != nil {
-			e.onRetry(RetryInfo{Attempt: n, Status: status, Err: err, Delay: delay})
+			e.onRetry(RetryInfo{Attempt: n, Status: status, Err: err, Delay: delay, Reason: reason})
 		}
 		if err := e.sleep(ctx, delay); err != nil {
 			return nil, err
@@ -153,6 +211,57 @@ func drainStatus(resp *http.Response) int {
 	_, _ = io.Copy(io.Discard, resp.Body)
 	_ = resp.Body.Close()
 	return resp.StatusCode
+}
+
+// closeAttempt closes a retryable response body, returning its status code
+// (0 when resp is nil). A body that went through bufferBody (buffered=true
+// implies a non-nil resp) needs no drain before closing: the socket is either
+// already at EOF (fully buffered) or deliberately abandoned (an over-cap
+// remainder may be arbitrarily large). Unbuffered bodies drain for connection
+// reuse, as today.
+func closeAttempt(resp *http.Response, buffered bool) int {
+	if !buffered {
+		return drainStatus(resp)
+	}
+	_ = resp.Body.Close()
+	return resp.StatusCode
+}
+
+// bufferBody reads up to maxBuffer+1 bytes of resp's body for predicate
+// evaluation and reassembles resp.Body as the buffered prefix followed by the
+// unread remainder, so the caller-visible body is never truncated. overflowed
+// reports that more than maxBuffer bytes were available (buf is nil in that
+// case: its content is irrelevant once predicates are skipped). maxBuffer<=0
+// (and MaxInt64, where the +1 would overflow) means unlimited: a plain
+// io.ReadAll.
+func bufferBody(resp *http.Response, maxBuffer int64) (buf []byte, overflowed bool, err error) {
+	orig := resp.Body
+	var read []byte
+	if maxBuffer <= 0 || maxBuffer == math.MaxInt64 {
+		read, err = io.ReadAll(orig)
+	} else {
+		read, err = io.ReadAll(io.LimitReader(orig, maxBuffer+1))
+		overflowed = int64(len(read)) > maxBuffer
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	resp.Body = &readCloser{Reader: io.MultiReader(bytes.NewReader(read), orig), orig: orig}
+	if overflowed {
+		return nil, true, nil
+	}
+	return read, false, nil
+}
+
+// readCloser stitches a buffered body prefix to the unread socket remainder,
+// closing the original body exactly once.
+type readCloser struct {
+	io.Reader
+	orig io.ReadCloser
+}
+
+func (rc *readCloser) Close() error {
+	return rc.orig.Close()
 }
 
 func timerSleep(ctx context.Context, d time.Duration) error {
