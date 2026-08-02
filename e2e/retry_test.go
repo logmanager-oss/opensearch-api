@@ -31,3 +31,12 @@ func TestRetry_AbortOnStopsImmediately(t *testing.T) {
 	assert.Contains(t, res.stderr, "terminal status 404")
 	assert.NotContains(t, res.stderr, "attempt 1")
 }
+
+func TestRetry_SuccessWhenNeverSatisfiedExhausts(t *testing.T) {
+	res := runOsapi(t, nil, adminArgs(
+		"--path", "/_cluster/health",
+		"--retry", "1", "--backoff", "constant", "--backoff-initial", "10ms",
+		"--success-when", `.status == "nonexistent"`)...)
+	require.Equal(t, 1, res.exitCode)
+	assert.Contains(t, res.stderr, "retries exhausted: --success-when not satisfied")
+}

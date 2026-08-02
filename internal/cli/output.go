@@ -43,6 +43,11 @@ func verboseHook(w io.Writer, verbose bool) func(retry.RetryInfo) {
 				info.Attempt, info.Err, info.Delay)
 			return
 		}
+		if info.Reason != "" {
+			_, _ = fmt.Fprintf(w, "attempt %d: status %d (%s); retrying in %s\n",
+				info.Attempt, info.Status, info.Reason, info.Delay)
+			return
+		}
 		_, _ = fmt.Fprintf(w, "attempt %d: status %d; retrying in %s\n",
 			info.Attempt, info.Status, info.Delay)
 	}

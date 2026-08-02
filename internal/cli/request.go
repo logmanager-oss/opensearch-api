@@ -40,6 +40,9 @@ type requestFlags struct {
 	backoffMax     time.Duration
 	backoffJitter  float64
 	abortOn        []int
+	retryWhen      string
+	successWhen    string
+	maxBodyBuffer  string
 }
 
 func runRequest(cmd *cobra.Command, qf *requestFlags) error {
@@ -52,6 +55,15 @@ func runRequest(cmd *cobra.Command, qf *requestFlags) error {
 	cfg, err := resolveConfig(cmd, qf)
 	if err != nil {
 		return err
+	}
+
+	retryWhen, err := retry.CompilePredicate(cfg.Retry.RetryWhen)
+	if err != nil {
+		return fmt.Errorf("invalid --retry-when: %w", err)
+	}
+	successWhen, err := retry.CompilePredicate(cfg.Retry.SuccessWhen)
+	if err != nil {
+		return fmt.Errorf("invalid --success-when: %w", err)
 	}
 
 	client, err := osclient.New(osclient.Options{
@@ -91,7 +103,10 @@ func runRequest(cmd *cobra.Command, qf *requestFlags) error {
 		return err
 	}
 
-	engine := retry.New(cfg.Retry, retry.WithOnRetry(verboseHook(cmd.ErrOrStderr(), qf.verbose)))
+	engine := retry.New(cfg.Retry,
+		retry.WithOnRetry(verboseHook(cmd.ErrOrStderr(), qf.verbose)),
+		retry.WithRetryWhen(retryWhen), retry.WithSuccessWhen(successWhen),
+		retry.WithWarn(cmd.ErrOrStderr()))
 	resp, doErr := engine.Do(ctx, func(ctx context.Context) (*http.Response, error) {
 		c := req.Clone(ctx)
 		if req.GetBody != nil {
@@ -133,6 +148,10 @@ func resolveConfig(cmd *cobra.Command, qf *requestFlags) (config.Config, error) 
 	if err != nil {
 		return config.Config{}, err
 	}
+	maxBodyBuffer, err := config.ParseSize(qf.maxBodyBuffer)
+	if err != nil {
+		return config.Config{}, fmt.Errorf("invalid --max-body-buffer: %w", err)
+	}
 
 	flags := config.Config{
 		Endpoint:   qf.endpoint,
@@ -141,12 +160,15 @@ func resolveConfig(cmd *cobra.Command, qf *requestFlags) (config.Config, error) 
 		CACertPath: qf.caCert,
 		Insecure:   qf.insecure,
 		Retry: config.RetryConfig{
-			MaxRetries: qf.retry,
-			Strategy:   strategy,
-			Initial:    qf.backoffInitial,
-			Max:        qf.backoffMax,
-			Jitter:     qf.backoffJitter,
-			AbortOn:    qf.abortOn,
+			MaxRetries:    qf.retry,
+			Strategy:      strategy,
+			Initial:       qf.backoffInitial,
+			Max:           qf.backoffMax,
+			Jitter:        qf.backoffJitter,
+			AbortOn:       qf.abortOn,
+			RetryWhen:     qf.retryWhen,
+			SuccessWhen:   qf.successWhen,
+			MaxBodyBuffer: maxBodyBuffer,
 		},
 	}
 
