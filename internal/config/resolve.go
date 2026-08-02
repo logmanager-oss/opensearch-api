@@ -19,6 +19,9 @@ const (
 	FieldBackoffMax     = "backoff-max"
 	FieldBackoffJitter  = "backoff-jitter"
 	FieldAbortOn        = "abort-on"
+	FieldRetryWhen      = "retry-when"
+	FieldSuccessWhen    = "success-when"
+	FieldMaxBodyBuffer  = "max-body-buffer"
 )
 
 // Sources bundles the inputs to Resolve, decoupled from cobra:
@@ -91,6 +94,15 @@ func applyFlags(cfg *Config, s *Sources) {
 	}
 	if s.changed(FieldAbortOn) {
 		cfg.Retry.AbortOn = slices.Clone(f.Retry.AbortOn)
+	}
+	if s.changed(FieldRetryWhen) {
+		cfg.Retry.RetryWhen = f.Retry.RetryWhen
+	}
+	if s.changed(FieldSuccessWhen) {
+		cfg.Retry.SuccessWhen = f.Retry.SuccessWhen
+	}
+	if s.changed(FieldMaxBodyBuffer) {
+		cfg.Retry.MaxBodyBuffer = f.Retry.MaxBodyBuffer
 	}
 }
 

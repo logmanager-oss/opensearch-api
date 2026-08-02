@@ -135,11 +135,15 @@ func TestResolveRetryFlags(t *testing.T) {
 	flags.Retry.Max = 10 * time.Second
 	flags.Retry.Jitter = 0.5
 	flags.Retry.AbortOn = []int{400, 409}
+	flags.Retry.RetryWhen = ".status == 429"
+	flags.Retry.SuccessWhen = ".ok == true"
+	flags.Retry.MaxBodyBuffer = 1024
 
 	got, err := Resolve(Sources{
 		Flags: flags,
 		Changed: changedSet(FieldRetry, FieldBackoff, FieldBackoffInitial,
-			FieldBackoffMax, FieldBackoffJitter, FieldAbortOn),
+			FieldBackoffMax, FieldBackoffJitter, FieldAbortOn,
+			FieldRetryWhen, FieldSuccessWhen, FieldMaxBodyBuffer),
 	})
 	require.NoError(t, err)
 	assert.Equal(t, 3, got.Retry.MaxRetries)
@@ -148,6 +152,9 @@ func TestResolveRetryFlags(t *testing.T) {
 	assert.Equal(t, 10*time.Second, got.Retry.Max)
 	assert.InDelta(t, 0.5, got.Retry.Jitter, 1e-9)
 	assert.Equal(t, []int{400, 409}, got.Retry.AbortOn)
+	assert.Equal(t, ".status == 429", got.Retry.RetryWhen)
+	assert.Equal(t, ".ok == true", got.Retry.SuccessWhen)
+	assert.Equal(t, int64(1024), got.Retry.MaxBodyBuffer)
 }
 
 func TestResolveClonesSlices(t *testing.T) {
