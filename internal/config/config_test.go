@@ -79,4 +79,78 @@ func TestDefaults(t *testing.T) {
 	assert.Equal(t, 30*time.Second, d.Retry.Max)
 	assert.Zero(t, d.Retry.Jitter)
 	assert.Nil(t, d.Retry.AbortOn)
+	assert.Empty(t, d.Retry.RetryWhen)
+	assert.Empty(t, d.Retry.SuccessWhen)
+	assert.Equal(t, int64(10*1024*1024), d.Retry.MaxBodyBuffer)
+
+	// The flag-default string and the parsed struct default must never drift.
+	parsed, err := ParseSize(DefaultMaxBodyBuffer)
+	require.NoError(t, err)
+	assert.Equal(t, parsed, d.Retry.MaxBodyBuffer)
+}
+
+func TestParseSize(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		want    int64
+		wantErr bool
+	}{
+		{name: "bare bytes", input: "512", want: 512},
+		{name: "zero", input: "0", want: 0},
+		{name: "explicit bytes unit", input: "512B", want: 512},
+		{name: "KiB", input: "10KiB", want: 10 * 1024},
+		{name: "MiB", input: "10MiB", want: 10 * 1024 * 1024},
+		{name: "GiB", input: "2GiB", want: 2 * 1024 * 1024 * 1024},
+		{name: "KB alias is 1024-based", input: "10KB", want: 10 * 1024},
+		{name: "MB alias is 1024-based", input: "10MB", want: 10 * 1024 * 1024},
+		{name: "GB alias is 1024-based", input: "2GB", want: 2 * 1024 * 1024 * 1024},
+		{name: "lowercase unit", input: "10mib", want: 10 * 1024 * 1024},
+		{name: "mixed case unit", input: "10MiB", want: 10 * 1024 * 1024},
+		{name: "empty", input: "", wantErr: true},
+		{name: "decimal", input: "1.5MiB", wantErr: true},
+		{name: "negative", input: "-1MiB", wantErr: true},
+		{name: "unknown unit", input: "10TiB", wantErr: true},
+		{name: "unit with no number", input: "MiB", wantErr: true},
+		{name: "unit multiplication overflows int64", input: "8589934592GiB", wantErr: true},
+		{name: "digits overflow int64", input: "99999999999999999999", wantErr: true},
+		{name: "default constant round-trips", input: DefaultMaxBodyBuffer, want: 10 * 1024 * 1024},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ParseSize(tt.input)
+			if tt.wantErr {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), fmt.Sprintf("%q", tt.input))
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestFormatSize(t *testing.T) {
+	tests := []struct {
+		name  string
+		input int64
+		want  string
+	}{
+		{name: "bytes", input: 512, want: "512B"},
+		{name: "zero", input: 0, want: "0B"},
+		{name: "KiB", input: 10 * 1024, want: "10KiB"},
+		{name: "MiB", input: 10 * 1024 * 1024, want: "10MiB"},
+		{name: "GiB", input: 2 * 1024 * 1024 * 1024, want: "2GiB"},
+		{name: "non-multiple stays bytes", input: 1025, want: "1025B"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := FormatSize(tt.input)
+			assert.Equal(t, tt.want, got)
+
+			parsed, err := ParseSize(got)
+			require.NoError(t, err)
+			assert.Equal(t, tt.input, parsed, "FormatSize output must round-trip through ParseSize")
+		})
+	}
 }

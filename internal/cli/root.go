@@ -23,7 +23,8 @@ func NewRootCommand(version string) *cobra.Command {
 		Version: version,
 		Long: "Send a single request to an OpenSearch REST endpoint. The response body is " +
 			"written to stdout (pipeable to jq); diagnostics go to stderr. Exit status is 0 " +
-			"for a 2xx response and 1 otherwise; the body is printed either way.",
+			"when the response is classified a success (2xx by default; see --success-when/" +
+			"--retry-when) and 1 otherwise; the body is printed either way.",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -71,6 +72,13 @@ func NewRootCommand(version string) *cobra.Command {
 		"backoff jitter as a fraction in [0,1)")
 	f.IntSliceVar(&qf.abortOn, config.FieldAbortOn, nil,
 		"status codes that stop retrying; comma-separated; only meaningful with --retry")
+	f.StringVar(&qf.retryWhen, config.FieldRetryWhen, "",
+		"jq expression evaluated against the JSON response body; truthy forces a retry even on 2xx")
+	f.StringVar(&qf.successWhen, config.FieldSuccessWhen, "",
+		"jq expression; the response counts as success only when truthy, regardless of status")
+	f.StringVar(&qf.maxBodyBuffer, config.FieldMaxBodyBuffer, config.DefaultMaxBodyBuffer,
+		"max response body buffered for --retry-when/--success-when evaluation (e.g. 10MiB; 0 = "+
+			"unlimited); larger bodies skip predicate evaluation with a warning")
 
 	registerCompletion(root, qf)
 	_ = root.MarkFlagRequired("path")

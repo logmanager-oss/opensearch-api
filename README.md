@@ -4,9 +4,10 @@
  retry behaviour.
 
 It behaves like a resilient `curl` for OpenSearch: bounded or unlimited retry with configurable
-backoff, optional insecure-TLS, and status-code-based success/terminal classification — in a single
-binary that can reach any endpoint. The response body is written to **stdout** (pipe it to `jq`);
-diagnostics and per-attempt retry detail go to **stderr**.
+backoff, optional insecure-TLS, and success/retry classification that defaults to status codes but
+can be driven by `jq` predicates against the response body — in a single binary that can reach any
+endpoint. The response body is written to **stdout** (pipe it to `jq`); diagnostics and per-attempt
+retry detail go to **stderr**.
 
 ## Install
 
@@ -39,6 +40,12 @@ echo '{"query":{"match_all":{}}}' | osapi -X POST --path my-index/_search -d @-
 
 # Scaffold a request body for an endpoint, then fill it in
 osapi -X POST --path _search --body-skeleton
+
+# Retry until the cluster reports green, judging success from the body instead of the status
+osapi --path _cluster/health --retry -1 --success-when '.status == "green"'
+
+# Poll a long-running task: a 200 with "completed": false is a failure indicator, so keep retrying
+osapi --path _tasks/oTUltX4IQMOUUVeiohTt8A:12345 --retry -1 --retry-when '.completed == false'
 ```
 
 ### Flags
@@ -60,6 +67,9 @@ osapi -X POST --path _search --body-skeleton
 | `-H, --header`       |           | request header as `"Key: Value"` (repeatable)                    |
 | `--retry`            | `0`       | number of retries (`0` = none; `-1` = unlimited)                 |
 | `--abort-on`         |           | status codes that stop retrying (comma-separated)                |
+| `--retry-when`       |           | jq expression against the JSON body; truthy forces a retry even on `2xx` |
+| `--success-when`     |           | jq expression; success only when truthy, regardless of status    |
+| `--max-body-buffer`  | `10MiB`   | max body buffered for `--retry-when`/`--success-when` (`0` = unlimited) |
 | `--backoff`          | `linear`  | backoff strategy: `constant`, `linear`, or `exponential`         |
 | `--backoff-initial`  | `2s`      | initial backoff delay                                            |
 | `--backoff-max`      | `30s`     | maximum backoff delay                                            |
@@ -103,14 +113,27 @@ whatever is exported in the shell.
 ## Retry model
 
 - `--retry N` performs `1 + N` attempts. `--retry 0` (the default) makes a single attempt with no
-  retry; `--retry -1` retries until the request succeeds or hits an `--abort-on` status.
-- Any `2xx` response is a success: the body is printed to stdout and the exit code is `0`.
-- A status listed in `--abort-on` stops retrying immediately (terminal failure).
-- Any other non-`2xx` response, or a transport error, is retried until the retry budget is
-  exhausted.
-- On any non-success outcome the exit code is `1`; a Ctrl-C (interrupt) exits with `130`.
+  retry; `--retry -1` retries until the request is classified a success or hits an `--abort-on`
+  status.
+- Each attempt is classified in this order: a transport error always retries; a non-`2xx` status
+  listed in `--abort-on` is a terminal failure (this wins over `--retry-when`/`--success-when`); a
+  truthy `--retry-when` forces a retry even on a `2xx`; a configured `--success-when` then decides
+  success or retry purely on its own truthiness, **regardless of status** — a truthy
+  `--success-when` on a `503` is a success, and a falsy one on a `200` is a retry; with neither
+  predicate set, any `2xx` is a success and everything else retries.
+- `--retry-when`/`--success-when` are `jq` expressions evaluated against the parsed JSON response
+  body. Truthiness follows `jq`: every value is truthy except `null` and `false` (so `0`, `""`,
+  `[]`, and `{}` all count as truthy).
+- Evaluating either predicate requires buffering the response body, up to `--max-body-buffer`
+  (default `10MiB`; `0` means unlimited). A body over that cap, or one that is empty or not valid
+  JSON, skips predicate evaluation for that attempt (with a warning on stderr, printed even without
+  `-v`) and is treated as `--retry-when` not matched / `--success-when` not satisfied; buffering
+  never truncates what reaches stdout — the final attempt's body prints in full even when over-cap.
+- On any non-success outcome the exit code is `1`; a Ctrl-C (interrupt) exits with `130`. Once
+  retries are exhausted, the stderr error names the deciding reason when one applies, e.g.
+  `retries exhausted: --success-when not satisfied`.
 - The response body is **always** printed to stdout, including for failing responses, so you can
-  inspect `4xx`/`5xx` payloads.
+  inspect `4xx`/`5xx` payloads (or a body a predicate rejected).
 
 ## Passwords
 

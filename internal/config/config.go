@@ -4,6 +4,8 @@ package config
 
 import (
 	"fmt"
+	"math"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -54,9 +56,22 @@ type RetryConfig struct {
 	Initial    time.Duration
 	Max        time.Duration
 	Jitter     float64
-	// AbortOn lists non-2xx status codes that stop retrying (abort). Empty means
-	// retry every non-2xx response. Any 2xx is always success.
+	// AbortOn lists non-2xx status codes that stop retrying (abort), regardless
+	// of RetryWhen/SuccessWhen — it applies only to non-2xx statuses and always
+	// wins over the body predicates. Empty means retry every non-2xx response.
+	// Any 2xx is always success.
 	AbortOn []int
+	// RetryWhen is a raw jq expression evaluated against the response body; a
+	// match triggers a retry. Compiled and evaluated by the retry layer, not
+	// internal/config.
+	RetryWhen string
+	// SuccessWhen is a raw jq expression evaluated against the response body; a
+	// match short-circuits retrying as success. Compiled and evaluated by the
+	// retry layer, not internal/config.
+	SuccessWhen string
+	// MaxBodyBuffer caps the bytes buffered from the response body for
+	// RetryWhen/SuccessWhen evaluation; 0 means unlimited.
+	MaxBodyBuffer int64
 }
 
 // Config is the fully resolved runtime configuration.
@@ -98,14 +113,89 @@ const (
 	defaultMax     = 30 * time.Second
 )
 
+// DefaultMaxBodyBuffer is the flag-default string for RetryConfig.MaxBodyBuffer.
+// Defaults parses it, and the CLI layer registers it verbatim as the flag
+// default, so the two representations can never drift apart.
+const DefaultMaxBodyBuffer = "10MiB"
+
 // Defaults returns the baseline configuration before any overrides.
 func Defaults() Config {
+	maxBodyBuffer, err := ParseSize(DefaultMaxBodyBuffer)
+	if err != nil {
+		panic(fmt.Sprintf("config: DefaultMaxBodyBuffer %q is not a valid size: %v", DefaultMaxBodyBuffer, err))
+	}
+
 	return Config{
 		Retry: RetryConfig{
-			MaxRetries: 0, // no retry by default; retrying is opt-in via --retry
-			Strategy:   Linear,
-			Initial:    defaultInitial,
-			Max:        defaultMax,
+			MaxRetries:    0, // no retry by default; retrying is opt-in via --retry
+			Strategy:      Linear,
+			Initial:       defaultInitial,
+			Max:           defaultMax,
+			MaxBodyBuffer: maxBodyBuffer,
 		},
+	}
+}
+
+const (
+	bytesPerKiB int64 = 1 << 10
+	bytesPerMiB int64 = 1 << 20
+	bytesPerGiB int64 = 1 << 30
+)
+
+const (
+	sizeErrFormat      = "invalid size %q: want <integer>[B|KiB|MiB|GiB]"
+	sizeRangeErrFormat = "invalid size %q: out of range"
+)
+
+// ParseSize parses a human-readable byte size: a bare integer is bytes, or an
+// integer followed by a case-insensitive unit (B, KiB, MiB, GiB; KB/MB/GB are
+// 1024-based aliases of KiB/MiB/GiB). Decimals and negative values are errors.
+func ParseSize(s string) (int64, error) {
+	i := 0
+	for i < len(s) && s[i] >= '0' && s[i] <= '9' {
+		i++
+	}
+	if i == 0 {
+		return 0, fmt.Errorf(sizeErrFormat, s)
+	}
+
+	n, err := strconv.ParseInt(s[:i], 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf(sizeRangeErrFormat, s)
+	}
+
+	var mult int64
+	switch strings.ToUpper(s[i:]) {
+	case "", "B":
+		mult = 1
+	case "KB", "KIB":
+		mult = bytesPerKiB
+	case "MB", "MIB":
+		mult = bytesPerMiB
+	case "GB", "GIB":
+		mult = bytesPerGiB
+	default:
+		return 0, fmt.Errorf(sizeErrFormat, s)
+	}
+
+	if n > math.MaxInt64/mult {
+		return 0, fmt.Errorf(sizeRangeErrFormat, s)
+	}
+
+	return n * mult, nil
+}
+
+// FormatSize renders n bytes using the largest unit of ParseSize's grammar
+// that divides it evenly, so a parsed size round-trips to its input form.
+func FormatSize(n int64) string {
+	switch {
+	case n >= bytesPerGiB && n%bytesPerGiB == 0:
+		return strconv.FormatInt(n/bytesPerGiB, 10) + "GiB"
+	case n >= bytesPerMiB && n%bytesPerMiB == 0:
+		return strconv.FormatInt(n/bytesPerMiB, 10) + "MiB"
+	case n >= bytesPerKiB && n%bytesPerKiB == 0:
+		return strconv.FormatInt(n/bytesPerKiB, 10) + "KiB"
+	default:
+		return strconv.FormatInt(n, 10) + "B"
 	}
 }

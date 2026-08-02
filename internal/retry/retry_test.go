@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -18,22 +20,29 @@ import (
 	"github.com/logmanager-oss/opensearch-api/internal/config"
 )
 
-// scriptServer returns an httptest server replying with the i-th status from
-// statuses (clamped to the last), plus an atomic call counter.
-func scriptServer(t *testing.T, statuses ...int) (srv *httptest.Server, counter *int32) {
+// scriptedServer returns an httptest server whose per-attempt response comes
+// from script (called with the 1-based attempt number), plus an atomic call
+// counter.
+func scriptedServer(t *testing.T, script func(i int) (status int, body string)) (srv *httptest.Server, counter *int32) {
 	t.Helper()
 	var n int32
 	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		i := int(atomic.AddInt32(&n, 1))
-		code := statuses[len(statuses)-1]
-		if i <= len(statuses) {
-			code = statuses[i-1]
-		}
-		w.WriteHeader(code)
-		_, _ = fmt.Fprintf(w, "attempt %d", i)
+		status, body := script(i)
+		w.WriteHeader(status)
+		_, _ = fmt.Fprint(w, body)
 	}))
 	t.Cleanup(srv.Close)
 	return srv, &n
+}
+
+// scriptServer replies with the i-th status from statuses (clamped to the
+// last) and an "attempt %d" body carrying the live attempt number.
+func scriptServer(t *testing.T, statuses ...int) (srv *httptest.Server, counter *int32) {
+	t.Helper()
+	return scriptedServer(t, func(i int) (int, string) {
+		return statuses[min(i, len(statuses))-1], fmt.Sprintf("attempt %d", i)
+	})
 }
 
 func serverAttempt(srv *httptest.Server) Attempt {
@@ -53,6 +62,22 @@ func recordingSleep() (func(context.Context, time.Duration) error, *[]time.Durat
 		return nil
 	}
 	return fn, &delays
+}
+
+// attemptScript is one scripted per-attempt response for scriptServerWithBodies.
+type attemptScript struct {
+	status int
+	body   string
+}
+
+// scriptServerWithBodies is scriptServer's cousin for tests that also need
+// per-attempt bodies (e.g. predicate evaluation), clamped to the last script.
+func scriptServerWithBodies(t *testing.T, attempts ...attemptScript) (srv *httptest.Server, counter *int32) {
+	t.Helper()
+	return scriptedServer(t, func(i int) (int, string) {
+		a := attempts[min(i, len(attempts))-1]
+		return a.status, a.body
+	})
 }
 
 func fixedRetryCfg() config.RetryConfig {
@@ -358,4 +383,239 @@ func TestEngineDoTransportContextErrorPropagates(t *testing.T) {
 	assert.ErrorIs(t, err, context.DeadlineExceeded)
 	assert.Equal(t, int32(1), atomic.LoadInt32(&n), "must not retry a context error")
 	assert.Empty(t, *delays)
+}
+
+func TestEngineDoRetryWhenThenSuccess(t *testing.T) {
+	srv, counter := scriptServerWithBodies(t,
+		attemptScript{status: 200, body: `{"retry":true}`},
+		attemptScript{status: 200, body: `{"retry":false}`},
+	)
+	sleep, delays := recordingSleep()
+	retryWhen, err := CompilePredicate(".retry")
+	require.NoError(t, err)
+	e := New(fixedRetryCfg(), WithSleep(sleep), WithRetryWhen(retryWhen))
+
+	resp, err := e.Do(context.Background(), serverAttempt(srv))
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+
+	assert.Equal(t, int32(2), atomic.LoadInt32(counter))
+	assert.Len(t, *delays, 1)
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"retry":false}`, string(body))
+}
+
+func TestEngineDoSuccessWhenExhaustionCarriesReason(t *testing.T) {
+	srv, _ := scriptServerWithBodies(t, attemptScript{status: 200, body: `{"ok":false}`})
+	sleep, _ := recordingSleep()
+	cfg := fixedRetryCfg()
+	cfg.MaxRetries = 1 // 2 attempts total
+	successWhen, err := CompilePredicate(".ok")
+	require.NoError(t, err)
+	e := New(cfg, WithSleep(sleep), WithSuccessWhen(successWhen))
+
+	resp, err := e.Do(context.Background(), serverAttempt(srv))
+	require.Error(t, err)
+	require.NotNil(t, resp)
+	defer func() { _ = resp.Body.Close() }()
+	assert.ErrorIs(t, err, ErrRetriesExhausted)
+	assert.Contains(t, err.Error(), "after 2 attempts")
+	assert.Contains(t, err.Error(), "--success-when not satisfied")
+}
+
+func TestEngineDoAbortOnBeatsRetryWhen(t *testing.T) {
+	srv, counter := scriptServerWithBodies(t, attemptScript{status: 409, body: `{}`})
+	sleep, _ := recordingSleep()
+	cfg := fixedRetryCfg()
+	cfg.AbortOn = []int{409}
+	retryWhen, err := CompilePredicate("true")
+	require.NoError(t, err)
+	e := New(cfg, WithSleep(sleep), WithRetryWhen(retryWhen))
+
+	resp, err := e.Do(context.Background(), serverAttempt(srv))
+	require.Error(t, err)
+	require.NotNil(t, resp)
+	defer func() { _ = resp.Body.Close() }()
+	assert.ErrorIs(t, err, ErrTerminalStatus)
+	assert.Equal(t, int32(1), atomic.LoadInt32(counter))
+}
+
+func TestEngineDoWarnsAndRecordsReason(t *testing.T) {
+	srv, _ := scriptServerWithBodies(t,
+		attemptScript{status: 200, body: "not json"},
+		attemptScript{status: 200, body: `{"ok":true}`},
+	)
+	sleep, _ := recordingSleep()
+	var buf bytes.Buffer
+	var infos []RetryInfo
+	successWhen, err := CompilePredicate(".ok")
+	require.NoError(t, err)
+	e := New(fixedRetryCfg(), WithSleep(sleep), WithSuccessWhen(successWhen), WithWarn(&buf),
+		WithOnRetry(func(ri RetryInfo) { infos = append(infos, ri) }))
+
+	resp, err := e.Do(context.Background(), serverAttempt(srv))
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+
+	assert.NotEmpty(t, buf.String())
+	require.Len(t, infos, 1)
+	assert.Equal(t, "--success-when not satisfied", infos[0].Reason)
+}
+
+func TestEngineDoCapOverflowKeepsFullBodyReadable(t *testing.T) {
+	pad := strings.Repeat("a", 100)
+	body := fmt.Sprintf(`{"pad":%q}`, pad)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(w, body)
+	}))
+	t.Cleanup(srv.Close)
+
+	var buf bytes.Buffer
+	// RetryWhen alone (no SuccessWhen): an overflowed, unevaluated body falls
+	// through to the plain status-based default instead of forcing a retry.
+	retryWhen, err := CompilePredicate(".retry")
+	require.NoError(t, err)
+	cfg := fixedRetryCfg()
+	cfg.MaxBodyBuffer = 16
+	e := New(cfg, WithRetryWhen(retryWhen), WithWarn(&buf))
+
+	resp, err := e.Do(context.Background(), serverAttempt(srv))
+	require.NoError(t, err) // status 200: falls back to status-based Success once overflow skips the predicate
+	defer func() { _ = resp.Body.Close() }()
+
+	got, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	assert.Equal(t, body, string(got), "body must not be truncated by the buffer cap")
+	assert.Contains(t, buf.String(), "--max-body-buffer")
+}
+
+func TestEngineDoRetriedOverflowClosedWithoutDraining(t *testing.T) {
+	sleep, _ := recordingSleep()
+	cfg := fixedRetryCfg()
+	cfg.MaxBodyBuffer = 20 // overflows the 1000-byte first body but not the 11-byte second one
+	successWhen, err := CompilePredicate(".ok")
+	require.NoError(t, err)
+	e := New(cfg, WithSleep(sleep), WithSuccessWhen(successWhen))
+
+	large := strings.Repeat("x", 1000)
+	first := &trackBody{Reader: bytes.NewReader([]byte(large))}
+	var n int32
+	attempt := func(_ context.Context) (*http.Response, error) {
+		if atomic.AddInt32(&n, 1) == 1 {
+			return &http.Response{StatusCode: 200, Body: first}, nil
+		}
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(bytes.NewReader([]byte(`{"ok":true}`)))}, nil
+	}
+
+	resp, err := e.Do(context.Background(), attempt)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+
+	assert.True(t, first.closed, "overflowed retried body must be closed")
+	remaining, err := io.ReadAll(first.Reader)
+	require.NoError(t, err)
+	assert.NotEmpty(t, remaining, "overflowed retried body must not be drained")
+}
+
+// A cap of MaxInt64 must take the unlimited path: naively computing cap+1 for
+// the LimitReader would overflow to a negative limit and read nothing.
+func TestBufferBodyMaxInt64CapIsUnlimited(t *testing.T) {
+	resp := &http.Response{Body: io.NopCloser(bytes.NewReader([]byte(`{"ok":true}`)))}
+
+	buf, overflowed, err := bufferBody(resp, math.MaxInt64)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+
+	assert.False(t, overflowed)
+	assert.JSONEq(t, `{"ok":true}`, string(buf))
+}
+
+func TestEngineDoMaxBodyBufferZeroIsUnlimited(t *testing.T) {
+	pad := strings.Repeat("a", 100000)
+	body := fmt.Sprintf(`{"pad":%q,"ok":true}`, pad)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(w, body)
+	}))
+	t.Cleanup(srv.Close)
+
+	var buf bytes.Buffer
+	successWhen, err := CompilePredicate(".ok")
+	require.NoError(t, err)
+	cfg := fixedRetryCfg()
+	cfg.MaxBodyBuffer = 0
+	e := New(cfg, WithSuccessWhen(successWhen), WithWarn(&buf))
+
+	resp, err := e.Do(context.Background(), serverAttempt(srv))
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+	assert.Empty(t, buf.String(), "unlimited buffer must not warn")
+}
+
+func TestEngineDoSuccessWhenOnNon2xx(t *testing.T) {
+	srv, counter := scriptServerWithBodies(t, attemptScript{status: 503, body: `{"ok":true}`})
+	sleep, _ := recordingSleep()
+	successWhen, err := CompilePredicate(".ok")
+	require.NoError(t, err)
+	e := New(fixedRetryCfg(), WithSleep(sleep), WithSuccessWhen(successWhen))
+
+	resp, err := e.Do(context.Background(), serverAttempt(srv))
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+	assert.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
+	assert.Equal(t, int32(1), atomic.LoadInt32(counter))
+}
+
+func TestEngineDoBodyReadErrorTreatedAsTransportError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Length", "100")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("short"))
+	}))
+	t.Cleanup(srv.Close)
+
+	sleep, _ := recordingSleep()
+	successWhen, err := CompilePredicate(".ok")
+	require.NoError(t, err)
+	cfg := fixedRetryCfg()
+	cfg.MaxRetries = 1
+	e := New(cfg, WithSleep(sleep), WithSuccessWhen(successWhen))
+
+	resp, err := e.Do(context.Background(), serverAttempt(srv)) //nolint:bodyclose // resp is nil on the body-read-error path.
+	require.Error(t, err)
+	assert.Nil(t, resp)
+	assert.ErrorIs(t, err, ErrRetriesExhausted)
+	assert.Contains(t, err.Error(), "reading response body")
+	assert.Contains(t, err.Error(), "after 2 attempts")
+}
+
+// repeat(null) never terminates on its own; a non-terminating predicate must
+// still make Do return promptly once ctx is done, not hang.
+func TestEngineDoContextCancelledDuringPredicateEvaluation(t *testing.T) {
+	srv, counter := scriptServerWithBodies(t, attemptScript{status: 200, body: `{}`})
+	retryWhen, err := CompilePredicate("repeat(null)")
+	require.NoError(t, err)
+	e := New(fixedRetryCfg(), WithRetryWhen(retryWhen))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	done := make(chan struct{})
+	var resp *http.Response
+	var doErr error
+	go func() {
+		resp, doErr = e.Do(ctx, serverAttempt(srv)) //nolint:bodyclose // resp is nil on the context-error path.
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Do did not return promptly on a cancelled context")
+	}
+
+	require.Error(t, doErr)
+	assert.Nil(t, resp)
+	assert.ErrorIs(t, doErr, context.DeadlineExceeded)
+	assert.Equal(t, int32(1), atomic.LoadInt32(counter), "the request itself must have completed before the timeout")
 }

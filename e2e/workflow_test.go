@@ -26,7 +26,8 @@ func TestWorkflow_IndexLifecycle(t *testing.T) {
 
 	res = runOsapi(t, nil, adminArgs(
 		"-X", "PUT", "--path", "/"+workflowIndex,
-		"-d", `{"settings":{"number_of_replicas":0}}`)...)
+		"-d", `{"settings":{"number_of_replicas":0}}`,
+		"--success-when", ".acknowledged")...)
 	require.Equal(t, 0, res.exitCode, "creating index: stderr: %s", res.stderr)
 	require.Contains(t, res.stdout, `"acknowledged":true`)
 

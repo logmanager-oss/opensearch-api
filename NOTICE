@@ -10,3 +10,9 @@ This product bundles a preprocessed copy of the OpenSearch API Specification.
 
 The vendored spec (internal/apispec/spec/) and its Apache-2.0 license text
 (internal/apispec/spec/LICENSE.txt) are used to generate internal/apispec/paths_gen.go.
+
+This product bundles gojq, used for --retry-when/--success-when predicates.
+
+  Source:  https://github.com/itchyny/gojq
+  License: MIT License
+  Version: v0.12.19
