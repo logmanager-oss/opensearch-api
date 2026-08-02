@@ -43,6 +43,9 @@ osapi -X POST --path _search --body-skeleton
 
 # Retry until the cluster reports green, judging success from the body instead of the status
 osapi --path _cluster/health --retry -1 --success-when '.status == "green"'
+
+# Poll a long-running task: a 200 with "completed": false is a failure indicator, so keep retrying
+osapi --path _tasks/oTUltX4IQMOUUVeiohTt8A:12345 --retry -1 --retry-when '.completed == false'
 ```
 
 ### Flags
