@@ -40,6 +40,9 @@ type requestFlags struct {
 	backoffMax     time.Duration
 	backoffJitter  float64
 	abortOn        []int
+	retryWhen      string
+	successWhen    string
+	maxBodyBuffer  string
 }
 
 func runRequest(cmd *cobra.Command, qf *requestFlags) error {
@@ -49,7 +52,7 @@ func runRequest(cmd *cobra.Command, qf *requestFlags) error {
 
 	ctx := cmd.Context()
 
-	cfg, err := resolveConfig(cmd, qf)
+	cfg, retryWhen, successWhen, err := resolveConfig(cmd, qf)
 	if err != nil {
 		return err
 	}
@@ -91,7 +94,10 @@ func runRequest(cmd *cobra.Command, qf *requestFlags) error {
 		return err
 	}
 
-	engine := retry.New(cfg.Retry, retry.WithOnRetry(verboseHook(cmd.ErrOrStderr(), qf.verbose)))
+	engine := retry.New(cfg.Retry,
+		retry.WithOnRetry(verboseHook(cmd.ErrOrStderr(), qf.verbose)),
+		retry.WithRetryWhen(retryWhen), retry.WithSuccessWhen(successWhen),
+		retry.WithWarn(cmd.ErrOrStderr()))
 	resp, doErr := engine.Do(ctx, func(ctx context.Context) (*http.Response, error) {
 		c := req.Clone(ctx)
 		if req.GetBody != nil {
@@ -116,14 +122,14 @@ func runRequest(cmd *cobra.Command, qf *requestFlags) error {
 	return doErr
 }
 
-// resolveConfig merges flags, env file, process env and defaults, then resolves
-// the password (prompting only on a TTY).
-func resolveConfig(cmd *cobra.Command, qf *requestFlags) (config.Config, error) {
+// resolveConfig merges flags, env file, process env and defaults, compiles
+// the body predicates, then resolves the password (prompting only on a TTY).
+func resolveConfig(cmd *cobra.Command, qf *requestFlags) (_ config.Config, retryWhen, successWhen *retry.Predicate, _ error) {
 	var fileVars map[string]string
 	if qf.envFile != "" {
 		vars, err := config.LoadEnvFile(qf.envFile)
 		if err != nil {
-			return config.Config{}, err
+			return config.Config{}, nil, nil, err
 		}
 		fileVars = vars
 	}
@@ -131,7 +137,11 @@ func resolveConfig(cmd *cobra.Command, qf *requestFlags) (config.Config, error) 
 
 	strategy, err := config.ParseBackoffStrategy(qf.backoff)
 	if err != nil {
-		return config.Config{}, err
+		return config.Config{}, nil, nil, err
+	}
+	maxBodyBuffer, err := config.ParseSize(qf.maxBodyBuffer)
+	if err != nil {
+		return config.Config{}, nil, nil, fmt.Errorf("invalid --max-body-buffer: %w", err)
 	}
 
 	flags := config.Config{
@@ -141,12 +151,15 @@ func resolveConfig(cmd *cobra.Command, qf *requestFlags) (config.Config, error) 
 		CACertPath: qf.caCert,
 		Insecure:   qf.insecure,
 		Retry: config.RetryConfig{
-			MaxRetries: qf.retry,
-			Strategy:   strategy,
-			Initial:    qf.backoffInitial,
-			Max:        qf.backoffMax,
-			Jitter:     qf.backoffJitter,
-			AbortOn:    qf.abortOn,
+			MaxRetries:    qf.retry,
+			Strategy:      strategy,
+			Initial:       qf.backoffInitial,
+			Max:           qf.backoffMax,
+			Jitter:        qf.backoffJitter,
+			AbortOn:       qf.abortOn,
+			RetryWhen:     qf.retryWhen,
+			SuccessWhen:   qf.successWhen,
+			MaxBodyBuffer: maxBodyBuffer,
 		},
 	}
 
@@ -156,15 +169,26 @@ func resolveConfig(cmd *cobra.Command, qf *requestFlags) (config.Config, error) 
 		Env:     env,
 	})
 	if err != nil {
-		return config.Config{}, err
+		return config.Config{}, nil, nil, err
+	}
+
+	// Compile the predicates before resolving the password, so a bad jq
+	// expression is reported without first prompting interactively.
+	retryWhen, err = retry.CompilePredicate(cfg.Retry.RetryWhen)
+	if err != nil {
+		return config.Config{}, nil, nil, fmt.Errorf("invalid --retry-when: %w", err)
+	}
+	successWhen, err = retry.CompilePredicate(cfg.Retry.SuccessWhen)
+	if err != nil {
+		return config.Config{}, nil, nil, fmt.Errorf("invalid --success-when: %w", err)
 	}
 
 	pw, err := config.ResolvePassword(cfg, config.TerminalPrompt(cfg.Username), isTerminal(cmd.InOrStdin()))
 	if err != nil {
-		return config.Config{}, err
+		return config.Config{}, nil, nil, err
 	}
 	cfg.Password = pw
-	return cfg, nil
+	return cfg, retryWhen, successWhen, nil
 }
 
 // parseQuery parses repeated key=value pairs into a query map.

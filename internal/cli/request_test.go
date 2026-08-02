@@ -60,6 +60,14 @@ func (c *capture) at(i int) recordedReq {
 // and a "body-<code>" payload, recording each request for assertions.
 func newServer(t *testing.T, rec *capture, statuses []int) *httptest.Server {
 	t.Helper()
+	return newBodyServer(t, rec, statuses, nil)
+}
+
+// newBodyServer replies with statuses[i]/bodies[i] for the i-th request (each
+// clamped to the last), recording each request for assertions. nil bodies
+// means newServer's "body-<code>" default.
+func newBodyServer(t *testing.T, rec *capture, statuses []int, bodies []string) *httptest.Server {
+	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		u, p, ok := r.BasicAuth()
@@ -77,8 +85,15 @@ func newServer(t *testing.T, rec *capture, statuses []int) *httptest.Server {
 		if idx < len(statuses) {
 			code = statuses[idx]
 		}
+		respBody := fmt.Sprintf("body-%d", code)
+		if len(bodies) > 0 {
+			respBody = bodies[len(bodies)-1]
+			if idx < len(bodies) {
+				respBody = bodies[idx]
+			}
+		}
 		w.WriteHeader(code)
-		_, _ = fmt.Fprintf(w, "body-%d", code)
+		_, _ = fmt.Fprint(w, respBody)
 	}))
 	t.Cleanup(srv.Close)
 	return srv
@@ -231,6 +246,79 @@ func TestRequestPasswordNeverLeaks(t *testing.T) {
 	assert.NotContains(t, err.Error(), pw)
 }
 
+func TestRequestRetryWhenForcesRetry(t *testing.T) {
+	var rec capture
+	srv := newBodyServer(t, &rec,
+		[]int{http.StatusOK, http.StatusOK},
+		[]string{`{"acknowledged":false}`, `{"acknowledged":true}`})
+
+	stdout, stderr, err := run(t, nil,
+		"--endpoint", srv.URL, "--path", "x",
+		"--retry", "1", "--backoff-initial", "1ms", "--verbose",
+		"--retry-when", ".acknowledged == false",
+	)
+	require.NoError(t, err)
+	assert.Equal(t, `{"acknowledged":true}`, stdout, "stdout is the final body only")
+	assert.Equal(t, 2, rec.len())
+	assert.Contains(t, stderr, "--retry-when matched")
+}
+
+func TestRequestSuccessWhenNotSatisfied(t *testing.T) {
+	var rec capture
+	srv := newBodyServer(t, &rec, []int{http.StatusOK}, []string{`{"status":"red"}`})
+
+	stdout, _, err := run(t, nil,
+		"--endpoint", srv.URL, "--path", "x",
+		"--success-when", `.status == "green"`,
+	)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--success-when not satisfied")
+	assert.Equal(t, `{"status":"red"}`, stdout)
+}
+
+func TestRequestSuccessWhenTruthyOnNon2xx(t *testing.T) {
+	var rec capture
+	srv := newBodyServer(t, &rec, []int{http.StatusServiceUnavailable}, []string{`{"status":"green"}`})
+
+	stdout, _, err := run(t, nil,
+		"--endpoint", srv.URL, "--path", "x",
+		"--retry", "0",
+		"--success-when", `.status == "green"`,
+	)
+	require.NoError(t, err, "truthy --success-when is success regardless of status")
+	assert.Equal(t, `{"status":"green"}`, stdout)
+	assert.Equal(t, 1, rec.len())
+}
+
+func TestRequestSuccessWhenNonJSONBody(t *testing.T) {
+	var rec capture
+	srv := newBodyServer(t, &rec, []int{http.StatusOK}, []string{"not json"})
+
+	stdout, stderr, err := run(t, nil,
+		"--endpoint", srv.URL, "--path", "x",
+		"--success-when", ".status",
+	)
+	require.Error(t, err)
+	assert.Contains(t, stderr, "not valid JSON")
+	assert.Contains(t, err.Error(), "--success-when not satisfied")
+	assert.Equal(t, "not json", stdout)
+}
+
+func TestRequestMaxBodyBufferOverflow(t *testing.T) {
+	var rec capture
+	bigBody := `{"status":"green","padding":"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}`
+	srv := newBodyServer(t, &rec, []int{http.StatusOK}, []string{bigBody})
+
+	stdout, stderr, err := run(t, nil,
+		"--endpoint", srv.URL, "--path", "x",
+		"--max-body-buffer", "16B",
+		"--success-when", `.status == "green"`,
+	)
+	require.Error(t, err)
+	assert.Contains(t, stderr, "exceeds --max-body-buffer")
+	assert.Equal(t, bigBody, stdout, "full body still printed despite overflow")
+}
+
 func TestRequestParseErrors(t *testing.T) {
 	const endpoint = "http://localhost:9200"
 	tests := []struct {
@@ -241,6 +329,9 @@ func TestRequestParseErrors(t *testing.T) {
 		{name: "query without =", args: []string{"--query", "novalue"}, wantSub: "query"},
 		{name: "header without :", args: []string{"--header", "novalue"}, wantSub: "header"},
 		{name: "bad backoff", args: []string{"--backoff", "garbage"}, wantSub: "backoff"},
+		{name: "bad retry-when", args: []string{"--retry-when", "("}, wantSub: "retry-when"},
+		{name: "bad success-when", args: []string{"--success-when", "("}, wantSub: "success-when"},
+		{name: "bad max-body-buffer", args: []string{"--max-body-buffer", "bogus"}, wantSub: "max-body-buffer"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -250,6 +341,16 @@ func TestRequestParseErrors(t *testing.T) {
 			assert.Contains(t, err.Error(), tt.wantSub)
 		})
 	}
+}
+
+// A bad predicate must be reported before password resolution: --username with
+// no password errors off-TTY, and the jq error still has to win.
+func TestRequestBadPredicateBeatsPasswordResolution(t *testing.T) {
+	_, _, err := run(t, nil, "--endpoint", "http://localhost:9200", "--path", "x",
+		"--username", "admin", "--retry-when", "(")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid --retry-when")
+	assert.NotContains(t, err.Error(), "password")
 }
 
 func TestRequestHeaderValues(t *testing.T) {
