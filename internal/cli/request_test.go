@@ -343,6 +343,16 @@ func TestRequestParseErrors(t *testing.T) {
 	}
 }
 
+// A bad predicate must be reported before password resolution: --username with
+// no password errors off-TTY, and the jq error still has to win.
+func TestRequestBadPredicateBeatsPasswordResolution(t *testing.T) {
+	_, _, err := run(t, nil, "--endpoint", "http://localhost:9200", "--path", "x",
+		"--username", "admin", "--retry-when", "(")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid --retry-when")
+	assert.NotContains(t, err.Error(), "password")
+}
+
 func TestRequestHeaderValues(t *testing.T) {
 	var rec capture
 	srv := newServer(t, &rec, []int{http.StatusOK})

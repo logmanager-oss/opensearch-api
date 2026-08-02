@@ -52,18 +52,9 @@ func runRequest(cmd *cobra.Command, qf *requestFlags) error {
 
 	ctx := cmd.Context()
 
-	cfg, err := resolveConfig(cmd, qf)
+	cfg, retryWhen, successWhen, err := resolveConfig(cmd, qf)
 	if err != nil {
 		return err
-	}
-
-	retryWhen, err := retry.CompilePredicate(cfg.Retry.RetryWhen)
-	if err != nil {
-		return fmt.Errorf("invalid --retry-when: %w", err)
-	}
-	successWhen, err := retry.CompilePredicate(cfg.Retry.SuccessWhen)
-	if err != nil {
-		return fmt.Errorf("invalid --success-when: %w", err)
 	}
 
 	client, err := osclient.New(osclient.Options{
@@ -131,14 +122,14 @@ func runRequest(cmd *cobra.Command, qf *requestFlags) error {
 	return doErr
 }
 
-// resolveConfig merges flags, env file, process env and defaults, then resolves
-// the password (prompting only on a TTY).
-func resolveConfig(cmd *cobra.Command, qf *requestFlags) (config.Config, error) {
+// resolveConfig merges flags, env file, process env and defaults, compiles
+// the body predicates, then resolves the password (prompting only on a TTY).
+func resolveConfig(cmd *cobra.Command, qf *requestFlags) (_ config.Config, retryWhen, successWhen *retry.Predicate, _ error) {
 	var fileVars map[string]string
 	if qf.envFile != "" {
 		vars, err := config.LoadEnvFile(qf.envFile)
 		if err != nil {
-			return config.Config{}, err
+			return config.Config{}, nil, nil, err
 		}
 		fileVars = vars
 	}
@@ -146,11 +137,11 @@ func resolveConfig(cmd *cobra.Command, qf *requestFlags) (config.Config, error) 
 
 	strategy, err := config.ParseBackoffStrategy(qf.backoff)
 	if err != nil {
-		return config.Config{}, err
+		return config.Config{}, nil, nil, err
 	}
 	maxBodyBuffer, err := config.ParseSize(qf.maxBodyBuffer)
 	if err != nil {
-		return config.Config{}, fmt.Errorf("invalid --max-body-buffer: %w", err)
+		return config.Config{}, nil, nil, fmt.Errorf("invalid --max-body-buffer: %w", err)
 	}
 
 	flags := config.Config{
@@ -178,15 +169,26 @@ func resolveConfig(cmd *cobra.Command, qf *requestFlags) (config.Config, error) 
 		Env:     env,
 	})
 	if err != nil {
-		return config.Config{}, err
+		return config.Config{}, nil, nil, err
+	}
+
+	// Compile the predicates before resolving the password, so a bad jq
+	// expression is reported without first prompting interactively.
+	retryWhen, err = retry.CompilePredicate(cfg.Retry.RetryWhen)
+	if err != nil {
+		return config.Config{}, nil, nil, fmt.Errorf("invalid --retry-when: %w", err)
+	}
+	successWhen, err = retry.CompilePredicate(cfg.Retry.SuccessWhen)
+	if err != nil {
+		return config.Config{}, nil, nil, fmt.Errorf("invalid --success-when: %w", err)
 	}
 
 	pw, err := config.ResolvePassword(cfg, config.TerminalPrompt(cfg.Username), isTerminal(cmd.InOrStdin()))
 	if err != nil {
-		return config.Config{}, err
+		return config.Config{}, nil, nil, err
 	}
 	cfg.Password = pw
-	return cfg, nil
+	return cfg, retryWhen, successWhen, nil
 }
 
 // parseQuery parses repeated key=value pairs into a query map.
