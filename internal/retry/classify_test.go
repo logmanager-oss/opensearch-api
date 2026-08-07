@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -29,7 +30,7 @@ func newTestEngine(t *testing.T, cfg config.RetryConfig, opts ...Option) *Engine
 	successWhen, err := CompilePredicate(cfg.SuccessWhen)
 	require.NoError(t, err)
 	allOpts := append([]Option{WithRetryWhen(retryWhen), WithSuccessWhen(successWhen)}, opts...)
-	return New(cfg, allOpts...)
+	return mustNew(t, cfg, allOpts...)
 }
 
 func TestClassify(t *testing.T) {
@@ -42,6 +43,7 @@ func TestClassify(t *testing.T) {
 		body         []byte
 		overflowed   bool
 		transportErr error
+		successCheck func(context.Context) (bool, error)
 		want         Outcome
 		wantReason   string
 	}{
@@ -175,11 +177,33 @@ func TestClassify(t *testing.T) {
 			want:       Retry,
 			wantReason: "--success-when not satisfied",
 		},
+		{
+			name:         "success check passes on 2xx",
+			status:       200,
+			successCheck: func(context.Context) (bool, error) { return true, nil },
+			want:         Success,
+		},
+		{
+			name:         "success check fails on 2xx",
+			status:       200,
+			successCheck: func(context.Context) (bool, error) { return false, nil },
+			want:         Retry,
+			wantReason:   "success check failed",
+		},
+		{
+			name:         "success check still consulted when retry-when is falsy",
+			cfg:          config.RetryConfig{RetryWhen: ".retry"},
+			status:       200,
+			body:         []byte(`{"retry":false}`),
+			successCheck: func(context.Context) (bool, error) { return false, nil },
+			want:         Retry,
+			wantReason:   "success check failed",
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			e := newTestEngine(t, tt.cfg)
+			e := newTestEngine(t, tt.cfg, WithSuccessCheck(tt.successCheck))
 			got, reason, err := e.classify(context.Background(), tt.status, tt.body, tt.overflowed, tt.transportErr)
 			require.NoError(t, err)
 			assert.Equal(t, tt.want, got, "classify(%d)", tt.status)
@@ -244,4 +268,80 @@ func TestClassifyNoPredicatesConfigured(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, Retry, got)
 	assert.Empty(t, reason)
+}
+
+func TestClassifySuccessCheckNotInvokedOnNon2xx(t *testing.T) {
+	var calls int
+	check := func(context.Context) (bool, error) {
+		calls++
+		return true, nil
+	}
+	e := newTestEngine(t, config.RetryConfig{}, WithSuccessCheck(check))
+
+	got, reason, err := e.classify(context.Background(), 503, nil, false, nil)
+	require.NoError(t, err)
+	assert.Equal(t, Retry, got)
+	assert.Empty(t, reason)
+	assert.Zero(t, calls, "success check must not run on a non-2xx response")
+}
+
+func TestClassifySuccessCheckNotInvokedWhenAbortOnWins(t *testing.T) {
+	var calls int
+	check := func(context.Context) (bool, error) {
+		calls++
+		return true, nil
+	}
+	cfg := config.RetryConfig{AbortOn: []int{409}}
+	e := newTestEngine(t, cfg, WithSuccessCheck(check))
+
+	got, _, err := e.classify(context.Background(), 409, nil, false, nil)
+	require.NoError(t, err)
+	assert.Equal(t, Terminal, got)
+	assert.Zero(t, calls, "success check must not run when abort-on wins")
+}
+
+func TestClassifySuccessCheckNotInvokedWhenRetryWhenMatches(t *testing.T) {
+	var calls int
+	check := func(context.Context) (bool, error) {
+		calls++
+		return true, nil
+	}
+	cfg := config.RetryConfig{RetryWhen: "true"}
+	e := newTestEngine(t, cfg, WithSuccessCheck(check))
+
+	got, reason, err := e.classify(context.Background(), 200, []byte(`{}`), false, nil)
+	require.NoError(t, err)
+	assert.Equal(t, Retry, got)
+	assert.Equal(t, "--retry-when matched", reason)
+	assert.Zero(t, calls, "success check must not run when --retry-when matches")
+}
+
+func TestClassifySuccessCheckErrorPropagates(t *testing.T) {
+	tests := []struct {
+		name   string
+		err    error
+		wantIs error
+	}{
+		{
+			name:   "wrapped terminal status",
+			err:    fmt.Errorf("nested verify: %w", ErrTerminalStatus),
+			wantIs: ErrTerminalStatus,
+		},
+		{
+			name:   "context canceled",
+			err:    context.Canceled,
+			wantIs: context.Canceled,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			check := func(context.Context) (bool, error) { return false, tt.err }
+			e := newTestEngine(t, config.RetryConfig{}, WithSuccessCheck(check))
+
+			_, _, err := e.classify(context.Background(), 200, nil, false, nil)
+			require.Error(t, err)
+			assert.ErrorIs(t, err, tt.wantIs)
+		})
+	}
 }

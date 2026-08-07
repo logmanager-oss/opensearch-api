@@ -94,10 +94,13 @@ func runRequest(cmd *cobra.Command, qf *requestFlags) error {
 		return err
 	}
 
-	engine := retry.New(cfg.Retry,
+	engine, err := retry.New(cfg.Retry,
 		retry.WithOnRetry(verboseHook(cmd.ErrOrStderr(), qf.verbose)),
 		retry.WithRetryWhen(retryWhen), retry.WithSuccessWhen(successWhen),
 		retry.WithWarn(cmd.ErrOrStderr()))
+	if err != nil {
+		return fmt.Errorf("building retry engine: %w", err)
+	}
 	resp, doErr := engine.Do(ctx, func(ctx context.Context) (*http.Response, error) {
 		c := req.Clone(ctx)
 		if req.GetBody != nil {

@@ -37,13 +37,14 @@ type RetryInfo struct {
 // Engine drives a retry loop with configurable outcome classification and
 // backoff. It is safe for reuse across calls.
 type Engine struct {
-	cfg         config.RetryConfig
-	sleep       func(context.Context, time.Duration) error
-	jitter      func() float64
-	onRetry     func(RetryInfo)
-	retryWhen   *Predicate
-	successWhen *Predicate
-	warn        io.Writer
+	cfg          config.RetryConfig
+	sleep        func(context.Context, time.Duration) error
+	jitter       func() float64
+	onRetry      func(RetryInfo)
+	retryWhen    *Predicate
+	successWhen  *Predicate
+	warn         io.Writer
+	successCheck func(context.Context) (bool, error)
 }
 
 // Option configures an Engine.
@@ -80,6 +81,13 @@ func WithWarn(w io.Writer) Option {
 	return func(e *Engine) { e.warn = w }
 }
 
+// WithSuccessCheck sets an external success check consulted only on a 2xx
+// response, after abort-on and retry-when. nil disables it. Mutually
+// exclusive with WithSuccessWhen (enforced by New).
+func WithSuccessCheck(fn func(ctx context.Context) (bool, error)) Option {
+	return func(e *Engine) { e.successCheck = fn }
+}
+
 // hasPredicates reports whether any body predicate is configured — the gate
 // for buffering bodies in Do and for evaluating predicates in classify, which
 // must always agree.
@@ -87,13 +95,18 @@ func (e *Engine) hasPredicates() bool {
 	return e.retryWhen != nil || e.successWhen != nil
 }
 
-// New builds an Engine for cfg with the given options.
+// New builds an Engine for cfg with the given options. Setting both
+// WithSuccessWhen and WithSuccessCheck is an error: classify defines no
+// ordering between them.
 //
 //nolint:gocritic // hugeParam: RetryConfig passed by value by design (small, immutable).
-func New(cfg config.RetryConfig, opts ...Option) *Engine {
+func New(cfg config.RetryConfig, opts ...Option) (*Engine, error) {
 	e := &Engine{cfg: cfg}
 	for _, opt := range opts {
 		opt(e)
+	}
+	if e.successWhen != nil && e.successCheck != nil {
+		return nil, errors.New("WithSuccessWhen and WithSuccessCheck are mutually exclusive")
 	}
 	if e.sleep == nil {
 		e.sleep = timerSleep
@@ -104,7 +117,7 @@ func New(cfg config.RetryConfig, opts ...Option) *Engine {
 	if e.warn == nil {
 		e.warn = io.Discard
 	}
-	return e
+	return e, nil
 }
 
 // Do runs attempt until success, a terminal status, attempt exhaustion, or
@@ -143,10 +156,10 @@ func (e *Engine) Do(ctx context.Context, attempt Attempt) (*http.Response, error
 		if resp != nil {
 			respStatus = resp.StatusCode
 		}
-		outcome, reason, ctxErr := e.classify(ctx, respStatus, body, overflowed, err)
-		if ctxErr != nil {
+		outcome, reason, classifyErr := e.classify(ctx, respStatus, body, overflowed, err)
+		if classifyErr != nil {
 			closeAttempt(resp, buffered)
-			return nil, ctxErr
+			return nil, classifyErr
 		}
 
 		switch outcome {
