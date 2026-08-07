@@ -1,6 +1,7 @@
 // Package cli builds the osapi command: a resilient client for OpenSearch REST
-// endpoints with configurable retry. osapi is a single-purpose tool, so the root
-// command itself sends the request (there is no "request" subcommand).
+// endpoints with configurable retry. The root command itself sends a single
+// request (there is no "request" subcommand); the "run" subcommand executes a
+// YAML-defined runbook of calls instead.
 package cli
 
 import (
@@ -33,23 +34,9 @@ func NewRootCommand(version string) *cobra.Command {
 		},
 	}
 
+	registerConnFlags(root, &qf.connFlags)
+
 	f := root.Flags()
-	f.StringVar(&qf.endpoint, config.FieldEndpoint, "",
-		"OpenSearch endpoint URL (e.g. https://localhost:9200)")
-	f.StringVarP(&qf.username, config.FieldUsername, "u", "",
-		"username for basic authentication")
-	f.StringVar(&qf.password, config.FieldPassword, "",
-		"password for basic auth (visible in ps output and shell history; "+
-			"prefer OPENSEARCH_PASSWORD, --env-file, or the interactive prompt)")
-	f.StringVar(&qf.caCert, config.FieldCACert, "",
-		"verify the server's TLS certificate against this CA bundle (PEM) instead "+
-			"of the system roots; use it for a private/self-signed cluster CA")
-	f.BoolVarP(&qf.insecure, config.FieldInsecure, "k", false,
-		"skip TLS certificate verification")
-	f.BoolVarP(&qf.verbose, "verbose", "v", false,
-		"print per-attempt retry detail to stderr")
-	f.StringVar(&qf.envFile, "env-file", "",
-		"path to a dotenv file providing OPENSEARCH_URL/USERNAME/PASSWORD")
 	f.StringVarP(&qf.method, "method", "X", http.MethodGet, "HTTP method")
 	f.StringVar(&qf.path, "path", "", "request path, e.g. _cluster/health")
 	f.StringVarP(&qf.body, "body", "d", "",

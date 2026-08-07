@@ -17,9 +17,9 @@ import (
 	"github.com/logmanager-oss/opensearch-api/internal/retry"
 )
 
-// requestFlags holds the request subcommand's flags: connection settings plus
-// the request itself.
-type requestFlags struct {
+// connFlags holds the connection flags shared by the root command and the
+// run subcommand: endpoint, credentials, TLS, and diagnostics.
+type connFlags struct {
 	endpoint string
 	username string
 	password string
@@ -27,6 +27,35 @@ type requestFlags struct {
 	insecure bool
 	verbose  bool
 	envFile  string
+}
+
+// registerConnFlags registers the seven connection flags on cmd, binding them
+// into c. Root and run share this registration; request-shaping/retry flags
+// stay registered on root directly.
+func registerConnFlags(cmd *cobra.Command, c *connFlags) {
+	f := cmd.Flags()
+	f.StringVar(&c.endpoint, config.FieldEndpoint, "",
+		"OpenSearch endpoint URL (e.g. https://localhost:9200)")
+	f.StringVarP(&c.username, config.FieldUsername, "u", "",
+		"username for basic authentication")
+	f.StringVar(&c.password, config.FieldPassword, "",
+		"password for basic auth (visible in ps output and shell history; "+
+			"prefer OPENSEARCH_PASSWORD, --env-file, or the interactive prompt)")
+	f.StringVar(&c.caCert, config.FieldCACert, "",
+		"verify the server's TLS certificate against this CA bundle (PEM) instead "+
+			"of the system roots; use it for a private/self-signed cluster CA")
+	f.BoolVarP(&c.insecure, config.FieldInsecure, "k", false,
+		"skip TLS certificate verification")
+	f.BoolVarP(&c.verbose, "verbose", "v", false,
+		"print per-attempt retry detail to stderr")
+	f.StringVar(&c.envFile, "env-file", "",
+		"path to a dotenv file providing OPENSEARCH_URL/USERNAME/PASSWORD")
+}
+
+// requestFlags holds the root command's flags: connection settings (embedded)
+// plus the request itself.
+type requestFlags struct {
+	connFlags
 
 	method         string
 	path           string
@@ -57,14 +86,7 @@ func runRequest(cmd *cobra.Command, qf *requestFlags) error {
 		return err
 	}
 
-	client, err := osclient.New(osclient.Options{
-		Endpoint:   cfg.Endpoint,
-		Username:   cfg.Username,
-		Password:   cfg.Password,
-		CACertPath: cfg.CACertPath,
-		Insecure:   cfg.Insecure,
-		Warn:       cmd.ErrOrStderr(),
-	})
+	client, err := newClient(cmd, &cfg)
 	if err != nil {
 		return err
 	}
@@ -123,6 +145,19 @@ func runRequest(cmd *cobra.Command, qf *requestFlags) error {
 		}
 	}
 	return doErr
+}
+
+// newClient builds the HTTP client for cfg's connection settings, warning to
+// the command's stderr.
+func newClient(cmd *cobra.Command, cfg *config.Config) (*http.Client, error) {
+	return osclient.New(osclient.Options{
+		Endpoint:   cfg.Endpoint,
+		Username:   cfg.Username,
+		Password:   cfg.Password,
+		CACertPath: cfg.CACertPath,
+		Insecure:   cfg.Insecure,
+		Warn:       cmd.ErrOrStderr(),
+	})
 }
 
 // resolveConfig merges flags, env file, process env and defaults, compiles
