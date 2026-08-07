@@ -45,14 +45,21 @@ const (
 )
 
 // classify decides the outcome of an attempt and, when not the plain
-// status-based default, a short reason describing why. Order: a transport
-// error always retries; a non-2xx status listed in AbortOn is terminal
-// (abort-on wins over predicates); a truthy RetryWhen retries (a failure
-// indicator beats a success gate); a configured SuccessWhen decides success
-// or retry on its own truthiness; otherwise any 2xx is success and everything
-// else retries — unchanged from the no-predicate behaviour. A non-nil error
-// is always a context error from predicate evaluation, which the loop must
-// propagate instead of acting on the outcome.
+// status-based default, a short reason describing why. Precedence: a
+// transport error always retries; a non-2xx status listed in AbortOn is
+// terminal (abort-on wins over predicates and the success check, which are
+// not invoked); a truthy RetryWhen retries (a failure indicator beats a
+// success gate, and the success check is not invoked); a configured
+// SuccessWhen decides success or retry on its own truthiness, regardless of
+// status; a configured successCheck is consulted only on a 2xx response and
+// decides success or retry on its own result, a non-2xx retries without
+// invoking it; otherwise any 2xx is success and everything else retries —
+// unchanged from the no-predicate behaviour. SuccessWhen and successCheck
+// never coexist (New rejects the combination) — no ordering between them is
+// defined here.
+// A non-nil error is either a context error from predicate evaluation or any
+// error returned by successCheck, both of which the loop must propagate
+// instead of acting on the outcome.
 func (e *Engine) classify(ctx context.Context, status int, body []byte, overflowed bool, transportErr error) (Outcome, string, error) {
 	if transportErr != nil {
 		return Retry, "", nil
@@ -80,6 +87,16 @@ func (e *Engine) classify(ctx context.Context, status int, body []byte, overflow
 			}
 			return Retry, "--success-when not satisfied", nil
 		}
+	}
+	if e.successCheck != nil && is2xx {
+		ok, err := e.successCheck(ctx)
+		if err != nil {
+			return Retry, "", err
+		}
+		if !ok {
+			return Retry, "success check failed", nil
+		}
+		return Success, "", nil
 	}
 	if is2xx {
 		return Success, "", nil

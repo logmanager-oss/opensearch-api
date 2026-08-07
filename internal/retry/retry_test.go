@@ -80,6 +80,16 @@ func scriptServerWithBodies(t *testing.T, attempts ...attemptScript) (srv *httpt
 	})
 }
 
+// mustNew builds an Engine, failing the test on an invalid option combination.
+//
+//nolint:gocritic // hugeParam: RetryConfig passed by value to mirror New.
+func mustNew(t *testing.T, cfg config.RetryConfig, opts ...Option) *Engine {
+	t.Helper()
+	e, err := New(cfg, opts...)
+	require.NoError(t, err)
+	return e
+}
+
 func fixedRetryCfg() config.RetryConfig {
 	// MaxRetries: -1 = unlimited, so tests retry until success/terminal unless
 	// they override it.
@@ -89,7 +99,7 @@ func fixedRetryCfg() config.RetryConfig {
 func TestEngineDoSuccessAfterRetries(t *testing.T) {
 	srv, counter := scriptServer(t, 503, 503, 200)
 	sleep, delays := recordingSleep()
-	e := New(fixedRetryCfg(), WithSleep(sleep))
+	e := mustNew(t, fixedRetryCfg(), WithSleep(sleep))
 
 	resp, err := e.Do(context.Background(), serverAttempt(srv))
 	require.NoError(t, err)
@@ -110,7 +120,7 @@ func TestEngineDoTerminalStatus(t *testing.T) {
 	sleep, delays := recordingSleep()
 	cfg := fixedRetryCfg()
 	cfg.AbortOn = []int{409}
-	e := New(cfg, WithSleep(sleep))
+	e := mustNew(t, cfg, WithSleep(sleep))
 
 	resp, err := e.Do(context.Background(), serverAttempt(srv))
 	require.Error(t, err)
@@ -132,7 +142,7 @@ func TestEngineDoTerminalStatus404(t *testing.T) {
 		sleep, _ := recordingSleep()
 		cfg := fixedRetryCfg()
 		cfg.AbortOn = []int{409, 404}
-		e := New(cfg, WithSleep(sleep))
+		e := mustNew(t, cfg, WithSleep(sleep))
 
 		resp, err := e.Do(context.Background(), serverAttempt(srv))
 		require.Error(t, err)
@@ -145,7 +155,7 @@ func TestEngineDoTerminalStatus404(t *testing.T) {
 	t.Run("404 retried by default", func(t *testing.T) {
 		srv, counter := scriptServer(t, 404, 404, 200)
 		sleep, _ := recordingSleep()
-		e := New(fixedRetryCfg(), WithSleep(sleep))
+		e := mustNew(t, fixedRetryCfg(), WithSleep(sleep))
 
 		resp, err := e.Do(context.Background(), serverAttempt(srv))
 		require.NoError(t, err)
@@ -158,7 +168,7 @@ func TestEngineDoTerminalStatus404(t *testing.T) {
 func TestEngineDoTransportErrorThenSuccess(t *testing.T) {
 	srv, _ := scriptServer(t, 200)
 	sleep, delays := recordingSleep()
-	e := New(fixedRetryCfg(), WithSleep(sleep))
+	e := mustNew(t, fixedRetryCfg(), WithSleep(sleep))
 
 	var n int32
 	attempt := func(ctx context.Context) (*http.Response, error) {
@@ -180,7 +190,7 @@ func TestEngineDoRetriesExhausted(t *testing.T) {
 	sleep, delays := recordingSleep()
 	cfg := fixedRetryCfg()
 	cfg.MaxRetries = 2 // 2 retries => 3 attempts total
-	e := New(cfg, WithSleep(sleep))
+	e := mustNew(t, cfg, WithSleep(sleep))
 
 	resp, err := e.Do(context.Background(), serverAttempt(srv))
 	require.Error(t, err)
@@ -200,7 +210,7 @@ func TestEngineDoTransportErrorExhaustedWrapsCause(t *testing.T) {
 	sleep, delays := recordingSleep()
 	cfg := fixedRetryCfg()
 	cfg.MaxRetries = 2 // 2 retries => 3 attempts total
-	e := New(cfg, WithSleep(sleep))
+	e := mustNew(t, cfg, WithSleep(sleep))
 
 	cause := errors.New("dial tcp: connection refused")
 	attempt := func(context.Context) (*http.Response, error) { return nil, cause }
@@ -219,7 +229,7 @@ func TestEngineDoOnRetryHook(t *testing.T) {
 	srv, _ := scriptServer(t, 503, 503, 200)
 	sleep, _ := recordingSleep()
 	var infos []RetryInfo
-	e := New(fixedRetryCfg(), WithSleep(sleep), WithOnRetry(func(ri RetryInfo) {
+	e := mustNew(t, fixedRetryCfg(), WithSleep(sleep), WithOnRetry(func(ri RetryInfo) {
 		infos = append(infos, ri)
 	}))
 
@@ -246,7 +256,7 @@ func (b *trackBody) Close() error {
 
 func TestEngineDoDrainsRetriedBodies(t *testing.T) {
 	sleep, _ := recordingSleep()
-	e := New(fixedRetryCfg(), WithSleep(sleep))
+	e := mustNew(t, fixedRetryCfg(), WithSleep(sleep))
 
 	first := &trackBody{Reader: bytes.NewReader([]byte("retry-body"))}
 	var n int32
@@ -270,7 +280,7 @@ func TestEngineDoDrainsRetriedBodies(t *testing.T) {
 func TestEngineDoContextCancelMidBackoff(t *testing.T) {
 	srv, counter := scriptServer(t, 503)
 	cfg := config.RetryConfig{MaxRetries: -1, Strategy: config.Constant, Initial: 10 * time.Second}
-	e := New(cfg) // real context-aware sleep
+	e := mustNew(t, cfg) // real context-aware sleep
 
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
@@ -293,7 +303,7 @@ func TestEngineDoContextCancelMidBackoff(t *testing.T) {
 // not leaked, and must not be handed back to the caller.
 func TestEngineDoDrainsResponseOnContextError(t *testing.T) {
 	sleep, _ := recordingSleep()
-	e := New(fixedRetryCfg(), WithSleep(sleep))
+	e := mustNew(t, fixedRetryCfg(), WithSleep(sleep))
 
 	body := &trackBody{Reader: bytes.NewReader([]byte("leaked"))}
 	attempt := func(_ context.Context) (*http.Response, error) {
@@ -311,7 +321,7 @@ func TestEngineDoDrainsResponseOnContextError(t *testing.T) {
 func TestEngineDoNilSleepFallsBack(t *testing.T) {
 	srv, counter := scriptServer(t, 503, 200)
 	cfg := config.RetryConfig{MaxRetries: 1, Strategy: config.Constant, Initial: time.Millisecond}
-	e := New(cfg, WithSleep(nil))
+	e := mustNew(t, cfg, WithSleep(nil))
 
 	resp, err := e.Do(context.Background(), serverAttempt(srv))
 	require.NoError(t, err)
@@ -325,7 +335,7 @@ func TestEngineDoNilSleepFallsBack(t *testing.T) {
 func TestEngineDoNoHookWhenCancelledBeforeSleep(t *testing.T) {
 	sleep, delays := recordingSleep()
 	var infos []RetryInfo
-	e := New(fixedRetryCfg(), WithSleep(sleep), WithOnRetry(func(ri RetryInfo) {
+	e := mustNew(t, fixedRetryCfg(), WithSleep(sleep), WithOnRetry(func(ri RetryInfo) {
 		infos = append(infos, ri)
 	}))
 
@@ -352,7 +362,7 @@ func TestEngineDoNoRetry(t *testing.T) {
 	sleep, delays := recordingSleep()
 	cfg := fixedRetryCfg()
 	cfg.MaxRetries = 0
-	e := New(cfg, WithSleep(sleep))
+	e := mustNew(t, cfg, WithSleep(sleep))
 
 	resp, err := e.Do(context.Background(), serverAttempt(srv))
 	require.Error(t, err)
@@ -369,7 +379,7 @@ func TestEngineDoNoRetry(t *testing.T) {
 // ctx.Err() may be nil) is propagated, not retried.
 func TestEngineDoTransportContextErrorPropagates(t *testing.T) {
 	sleep, delays := recordingSleep()
-	e := New(fixedRetryCfg(), WithSleep(sleep))
+	e := mustNew(t, fixedRetryCfg(), WithSleep(sleep))
 
 	var n int32
 	attempt := func(_ context.Context) (*http.Response, error) {
@@ -393,7 +403,7 @@ func TestEngineDoRetryWhenThenSuccess(t *testing.T) {
 	sleep, delays := recordingSleep()
 	retryWhen, err := CompilePredicate(".retry")
 	require.NoError(t, err)
-	e := New(fixedRetryCfg(), WithSleep(sleep), WithRetryWhen(retryWhen))
+	e := mustNew(t, fixedRetryCfg(), WithSleep(sleep), WithRetryWhen(retryWhen))
 
 	resp, err := e.Do(context.Background(), serverAttempt(srv))
 	require.NoError(t, err)
@@ -413,7 +423,7 @@ func TestEngineDoSuccessWhenExhaustionCarriesReason(t *testing.T) {
 	cfg.MaxRetries = 1 // 2 attempts total
 	successWhen, err := CompilePredicate(".ok")
 	require.NoError(t, err)
-	e := New(cfg, WithSleep(sleep), WithSuccessWhen(successWhen))
+	e := mustNew(t, cfg, WithSleep(sleep), WithSuccessWhen(successWhen))
 
 	resp, err := e.Do(context.Background(), serverAttempt(srv))
 	require.Error(t, err)
@@ -431,7 +441,7 @@ func TestEngineDoAbortOnBeatsRetryWhen(t *testing.T) {
 	cfg.AbortOn = []int{409}
 	retryWhen, err := CompilePredicate("true")
 	require.NoError(t, err)
-	e := New(cfg, WithSleep(sleep), WithRetryWhen(retryWhen))
+	e := mustNew(t, cfg, WithSleep(sleep), WithRetryWhen(retryWhen))
 
 	resp, err := e.Do(context.Background(), serverAttempt(srv))
 	require.Error(t, err)
@@ -451,7 +461,7 @@ func TestEngineDoWarnsAndRecordsReason(t *testing.T) {
 	var infos []RetryInfo
 	successWhen, err := CompilePredicate(".ok")
 	require.NoError(t, err)
-	e := New(fixedRetryCfg(), WithSleep(sleep), WithSuccessWhen(successWhen), WithWarn(&buf),
+	e := mustNew(t, fixedRetryCfg(), WithSleep(sleep), WithSuccessWhen(successWhen), WithWarn(&buf),
 		WithOnRetry(func(ri RetryInfo) { infos = append(infos, ri) }))
 
 	resp, err := e.Do(context.Background(), serverAttempt(srv))
@@ -478,7 +488,7 @@ func TestEngineDoCapOverflowKeepsFullBodyReadable(t *testing.T) {
 	require.NoError(t, err)
 	cfg := fixedRetryCfg()
 	cfg.MaxBodyBuffer = 16
-	e := New(cfg, WithRetryWhen(retryWhen), WithWarn(&buf))
+	e := mustNew(t, cfg, WithRetryWhen(retryWhen), WithWarn(&buf))
 
 	resp, err := e.Do(context.Background(), serverAttempt(srv))
 	require.NoError(t, err) // status 200: falls back to status-based Success once overflow skips the predicate
@@ -496,7 +506,7 @@ func TestEngineDoRetriedOverflowClosedWithoutDraining(t *testing.T) {
 	cfg.MaxBodyBuffer = 20 // overflows the 1000-byte first body but not the 11-byte second one
 	successWhen, err := CompilePredicate(".ok")
 	require.NoError(t, err)
-	e := New(cfg, WithSleep(sleep), WithSuccessWhen(successWhen))
+	e := mustNew(t, cfg, WithSleep(sleep), WithSuccessWhen(successWhen))
 
 	large := strings.Repeat("x", 1000)
 	first := &trackBody{Reader: bytes.NewReader([]byte(large))}
@@ -544,7 +554,7 @@ func TestEngineDoMaxBodyBufferZeroIsUnlimited(t *testing.T) {
 	require.NoError(t, err)
 	cfg := fixedRetryCfg()
 	cfg.MaxBodyBuffer = 0
-	e := New(cfg, WithSuccessWhen(successWhen), WithWarn(&buf))
+	e := mustNew(t, cfg, WithSuccessWhen(successWhen), WithWarn(&buf))
 
 	resp, err := e.Do(context.Background(), serverAttempt(srv))
 	require.NoError(t, err)
@@ -557,7 +567,7 @@ func TestEngineDoSuccessWhenOnNon2xx(t *testing.T) {
 	sleep, _ := recordingSleep()
 	successWhen, err := CompilePredicate(".ok")
 	require.NoError(t, err)
-	e := New(fixedRetryCfg(), WithSleep(sleep), WithSuccessWhen(successWhen))
+	e := mustNew(t, fixedRetryCfg(), WithSleep(sleep), WithSuccessWhen(successWhen))
 
 	resp, err := e.Do(context.Background(), serverAttempt(srv))
 	require.NoError(t, err)
@@ -579,7 +589,7 @@ func TestEngineDoBodyReadErrorTreatedAsTransportError(t *testing.T) {
 	require.NoError(t, err)
 	cfg := fixedRetryCfg()
 	cfg.MaxRetries = 1
-	e := New(cfg, WithSleep(sleep), WithSuccessWhen(successWhen))
+	e := mustNew(t, cfg, WithSleep(sleep), WithSuccessWhen(successWhen))
 
 	resp, err := e.Do(context.Background(), serverAttempt(srv)) //nolint:bodyclose // resp is nil on the body-read-error path.
 	require.Error(t, err)
@@ -589,13 +599,121 @@ func TestEngineDoBodyReadErrorTreatedAsTransportError(t *testing.T) {
 	assert.Contains(t, err.Error(), "after 2 attempts")
 }
 
+func TestEngineDoSuccessCheckPasses(t *testing.T) {
+	srv, counter := scriptServer(t, 200)
+	sleep, _ := recordingSleep()
+	check := func(context.Context) (bool, error) { return true, nil }
+	e := mustNew(t, fixedRetryCfg(), WithSleep(sleep), WithSuccessCheck(check))
+
+	resp, err := e.Do(context.Background(), serverAttempt(srv))
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, int32(1), atomic.LoadInt32(counter))
+}
+
+func TestEngineDoSuccessCheckExhaustionCarriesReason(t *testing.T) {
+	srv, _ := scriptServer(t, 200)
+	sleep, _ := recordingSleep()
+	cfg := fixedRetryCfg()
+	cfg.MaxRetries = 1 // 2 attempts total
+	check := func(context.Context) (bool, error) { return false, nil }
+	e := mustNew(t, cfg, WithSleep(sleep), WithSuccessCheck(check))
+
+	resp, err := e.Do(context.Background(), serverAttempt(srv))
+	require.Error(t, err)
+	require.NotNil(t, resp)
+	defer func() { _ = resp.Body.Close() }()
+	assert.ErrorIs(t, err, ErrRetriesExhausted)
+	assert.Contains(t, err.Error(), "after 2 attempts")
+	assert.Contains(t, err.Error(), "success check failed")
+}
+
+func TestEngineDoSuccessCheckNotInvokedOnNon2xx(t *testing.T) {
+	srv, counter := scriptServer(t, 503, 503, 200)
+	sleep, _ := recordingSleep()
+	var checkCalls int32
+	check := func(context.Context) (bool, error) {
+		atomic.AddInt32(&checkCalls, 1)
+		return true, nil
+	}
+	e := mustNew(t, fixedRetryCfg(), WithSleep(sleep), WithSuccessCheck(check))
+
+	resp, err := e.Do(context.Background(), serverAttempt(srv))
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+	assert.Equal(t, int32(3), atomic.LoadInt32(counter))
+	assert.Equal(t, int32(1), atomic.LoadInt32(&checkCalls), "check must run only on the final 2xx attempt")
+}
+
+func TestEngineDoSuccessCheckErrorStopsImmediately(t *testing.T) {
+	tests := []struct {
+		name   string
+		err    error
+		wantIs error
+	}{
+		{
+			name:   "wrapped terminal status",
+			err:    fmt.Errorf("nested verify: %w", ErrTerminalStatus),
+			wantIs: ErrTerminalStatus,
+		},
+		{
+			name:   "context canceled",
+			err:    context.Canceled,
+			wantIs: context.Canceled,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv, counter := scriptServer(t, 200, 200)
+			sleep, _ := recordingSleep()
+			check := func(context.Context) (bool, error) { return false, tt.err }
+			e := mustNew(t, fixedRetryCfg(), WithSleep(sleep), WithSuccessCheck(check))
+
+			resp, err := e.Do(context.Background(), serverAttempt(srv)) //nolint:bodyclose // resp is nil on the propagate-error path.
+			require.Error(t, err)
+			assert.Nil(t, resp)
+			assert.ErrorIs(t, err, tt.wantIs)
+			assert.Equal(t, int32(1), atomic.LoadInt32(counter), "must not attempt again once the check propagates an error")
+		})
+	}
+}
+
+func TestEngineDoSuccessCheckOnlyDoesNotBufferBody(t *testing.T) {
+	body := `{"status":"ok"}`
+	srv, _ := scriptServerWithBodies(t, attemptScript{status: 200, body: body})
+
+	check := func(context.Context) (bool, error) { return true, nil }
+	e := mustNew(t, fixedRetryCfg(), WithSuccessCheck(check))
+
+	resp, err := e.Do(context.Background(), serverAttempt(srv))
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+
+	got, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	assert.Equal(t, body, string(got))
+}
+
+func TestNewRejectsSuccessWhenWithSuccessCheck(t *testing.T) {
+	successWhen, err := CompilePredicate(".ok")
+	require.NoError(t, err)
+	check := func(context.Context) (bool, error) { return true, nil }
+
+	e, err := New(fixedRetryCfg(), WithSuccessWhen(successWhen), WithSuccessCheck(check))
+	require.Error(t, err)
+	assert.Nil(t, e)
+	assert.Contains(t, err.Error(), "mutually exclusive")
+}
+
 // repeat(null) never terminates on its own; a non-terminating predicate must
 // still make Do return promptly once ctx is done, not hang.
 func TestEngineDoContextCancelledDuringPredicateEvaluation(t *testing.T) {
 	srv, counter := scriptServerWithBodies(t, attemptScript{status: 200, body: `{}`})
 	retryWhen, err := CompilePredicate("repeat(null)")
 	require.NoError(t, err)
-	e := New(fixedRetryCfg(), WithRetryWhen(retryWhen))
+	e := mustNew(t, fixedRetryCfg(), WithRetryWhen(retryWhen))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
