@@ -1,7 +1,7 @@
 // Package runbook loads a YAML-defined runbook: an ordered sequence of
-// OpenSearch calls. Cross-call validation (resolving verify-with/depends-on
-// targets and populating Entries) is a later section; Load only parses,
-// defaults, and validates each call in isolation.
+// OpenSearch calls. Load parses, defaults, and validates each call, then
+// resolves cross-call references (verify-with/depends-on) so the resulting
+// Runbook is guaranteed executable.
 package runbook
 
 import (
@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -39,7 +41,7 @@ type Call struct {
 // Runbook is an ordered set of calls loaded from YAML.
 type Runbook struct {
 	Calls   []Call // document order
-	Entries []int  // indexes of entry calls, document order (populated by cross-call validation, a later section)
+	Entries []int  // indexes of entry calls (calls not targeted by any verify-with), document order
 	byName  map[string]int
 }
 
@@ -124,11 +126,13 @@ func (d *dependsOn) UnmarshalYAML(node *yaml.Node) error {
 }
 
 // Load parses a runbook YAML document into an ordered Runbook. Each call is
-// parsed, defaulted (from config.Defaults().Retry) and validated on its own;
-// verify-with/depends-on targets are stored as given but not resolved, and
-// Entries is left unpopulated — both are cross-call validation, a later
-// section.
-func Load(r io.Reader) (*Runbook, error) {
+// parsed, defaulted (from config.Defaults().Retry) and validated on its own,
+// then cross-call rules resolve verify-with/depends-on targets, reject
+// cycles, and populate Entries so the result is guaranteed executable.
+// baseDir is the directory relative @file body paths are resolved against
+// (the runbook file's own directory); "" resolves them against the process
+// cwd.
+func Load(r io.Reader, baseDir string) (*Runbook, error) {
 	dec := yaml.NewDecoder(r)
 	dec.KnownFields(true)
 
@@ -176,7 +180,7 @@ func Load(r io.Reader) (*Runbook, error) {
 		}
 		seen[name] = true
 
-		call, err := decodeCall(name, line, valNode)
+		call, err := decodeCall(name, line, valNode, baseDir)
 		if err != nil {
 			return nil, err
 		}
@@ -185,12 +189,110 @@ func Load(r io.Reader) (*Runbook, error) {
 		rb.Calls = append(rb.Calls, call)
 	}
 
+	if err := rb.validate(); err != nil {
+		return nil, err
+	}
+
 	return rb, nil
+}
+
+// validate applies the cross-call rules to a fully-decoded Runbook: it
+// resolves verify-with/depends-on targets, rejects cycles, and populates
+// Entries. It must run only after every call has been decoded, since it
+// relies on rb.byName covering the whole document.
+func (rb *Runbook) validate() error {
+	checkOnly := make(map[string]bool, len(rb.Calls))
+	for i := range rb.Calls {
+		call := &rb.Calls[i]
+		if call.VerifyWith == "" {
+			continue
+		}
+		if _, ok := rb.byName[call.VerifyWith]; !ok {
+			return fmt.Errorf("call %q: verify-with %q: not a defined call", call.Name, call.VerifyWith)
+		}
+		checkOnly[call.VerifyWith] = true
+	}
+
+	rb.Entries = make([]int, 0, len(rb.Calls))
+	for i := range rb.Calls {
+		if !checkOnly[rb.Calls[i].Name] {
+			rb.Entries = append(rb.Entries, i)
+		}
+	}
+	if len(rb.Entries) == 0 {
+		return errors.New("runbook: no entry calls: every call is a verify-with target")
+	}
+
+	for i := range rb.Calls {
+		if err := rb.validateDependsOn(i, checkOnly); err != nil {
+			return err
+		}
+	}
+
+	for i := range rb.Calls {
+		call := &rb.Calls[i]
+		if !checkOnly[call.Name] {
+			continue
+		}
+		if len(call.DependsOn) > 0 {
+			return fmt.Errorf("call %q: check-only calls (verify-with targets) may not have depends-on", call.Name)
+		}
+		if call.StopOnFailure {
+			return fmt.Errorf("call %q: check-only calls (verify-with targets) may not have stop-on-failure", call.Name)
+		}
+	}
+
+	return rb.detectVerifyWithCycles()
+}
+
+// validateDependsOn checks every depends-on target of the call at index i:
+// it must be a defined call, defined earlier in the document (forward
+// references would allow cycles), and an entry call rather than a check-only
+// one.
+func (rb *Runbook) validateDependsOn(i int, checkOnly map[string]bool) error {
+	call := &rb.Calls[i]
+	seen := make(map[string]bool, len(call.DependsOn))
+	for _, dep := range call.DependsOn {
+		if seen[dep] {
+			return fmt.Errorf("call %q: depends-on %q: listed more than once", call.Name, dep)
+		}
+		seen[dep] = true
+		depIdx, ok := rb.byName[dep]
+		if !ok {
+			return fmt.Errorf("call %q: depends-on %q: not a defined call", call.Name, dep)
+		}
+		if depIdx >= i {
+			return fmt.Errorf("call %q: depends-on %q: must be defined earlier in the document", call.Name, dep)
+		}
+		if checkOnly[dep] {
+			return fmt.Errorf("call %q: depends-on %q: target is a check-only call (a verify-with target)", call.Name, dep)
+		}
+	}
+	return nil
+}
+
+// detectVerifyWithCycles follows the single-edge verify-with chain from each
+// call and rejects self-cycles (a -> a) and longer cycles (a -> b -> a).
+// Chains without a cycle (a -> b -> c) are legal.
+func (rb *Runbook) detectVerifyWithCycles() error {
+	for i := range rb.Calls {
+		start := rb.Calls[i].Name
+		visited := map[string]bool{start: true}
+		cur := rb.Calls[i].VerifyWith
+		for cur != "" {
+			if visited[cur] {
+				return fmt.Errorf("call %q: verify-with cycle detected", start)
+			}
+			visited[cur] = true
+			cur = rb.Calls[rb.byName[cur]].VerifyWith
+		}
+	}
+	return nil
 }
 
 // decodeCall validates node's keys, decodes it into a callSpec, and builds
 // the resulting Call.
-func decodeCall(name string, line int, node *yaml.Node) (Call, error) {
+func decodeCall(name string, line int, node *yaml.Node, baseDir string) (Call, error) {
 	if node.Kind == yaml.AliasNode {
 		return Call{}, fmt.Errorf("call %q (line %d): YAML aliases are not supported", name, line)
 	}
@@ -198,35 +300,51 @@ func decodeCall(name string, line int, node *yaml.Node) (Call, error) {
 		return Call{}, fmt.Errorf("call %q (line %d): must be a mapping", name, line)
 	}
 
+	var hasSuccessWhen, hasVerifyWith bool
 	for i := 0; i < len(node.Content); i += 2 {
 		key := node.Content[i]
 		if !allowedCallKeys[key.Value] {
 			return Call{}, fmt.Errorf("call %q (line %d): unknown key %q", name, key.Line, key.Value)
 		}
+		hasSuccessWhen = hasSuccessWhen || key.Value == "success-when"
+		hasVerifyWith = hasVerifyWith || key.Value == "verify-with"
+	}
+	// Checked on key presence, not decoded values: the spec fields are
+	// pre-populated from defaults below, so the values alone cannot tell what
+	// the user actually wrote.
+	if hasSuccessWhen && hasVerifyWith {
+		return Call{}, fmt.Errorf("call %q (line %d): success-when and verify-with are mutually exclusive", name, line)
 	}
 
 	// Pre-populate from the flag-mode defaults so a key absent from the YAML
 	// keeps the default even if that default ever stops being the zero value;
-	// Decode only touches fields whose keys are present.
+	// Decode only touches fields whose keys are present. String-encoded fields
+	// get the defaults' string forms so buildRetryConfig can parse them
+	// unconditionally, making an explicit empty value an error as in flag mode.
 	def := config.Defaults().Retry
 	spec := callSpec{
-		Retry:         def.MaxRetries,
-		BackoffJitter: def.Jitter,
-		AbortOn:       def.AbortOn,
-		RetryWhen:     def.RetryWhen,
-		SuccessWhen:   def.SuccessWhen,
+		Retry:          def.MaxRetries,
+		Backoff:        def.Strategy.String(),
+		BackoffInitial: def.Initial.String(),
+		BackoffMax:     def.Max.String(),
+		BackoffJitter:  def.Jitter,
+		AbortOn:        def.AbortOn,
+		RetryWhen:      def.RetryWhen,
+		SuccessWhen:    def.SuccessWhen,
+		MaxBodyBuffer:  config.FormatSize(def.MaxBodyBuffer),
 	}
 	if err := node.Decode(&spec); err != nil {
 		return Call{}, fmt.Errorf("call %q (line %d): decoding: %w", name, line, err)
 	}
 
-	return buildCall(name, line, &spec)
+	return buildCall(name, line, &spec, baseDir)
 }
 
 // buildCall validates spec and resolves it into a Call: reads/rejects the
-// body, parses the string-encoded retry fields, and compiles the jq
+// body (relative @file paths resolve against baseDir, the runbook file's
+// directory), parses the string-encoded retry fields, and compiles the jq
 // predicates.
-func buildCall(name string, line int, spec *callSpec) (Call, error) {
+func buildCall(name string, line int, spec *callSpec, baseDir string) (Call, error) {
 	if spec.Path == "" {
 		return Call{}, fmt.Errorf("call %q (line %d): path is required", name, line)
 	}
@@ -236,9 +354,16 @@ func buildCall(name string, line int, spec *callSpec) (Call, error) {
 		method = http.MethodGet
 	}
 
+	// Relative @file paths resolve against the runbook file's directory
+	// (baseDir), not the process cwd; "@-" and absolute paths are untouched.
+	bodyArg := spec.Body
+	if path, ok := strings.CutPrefix(bodyArg, "@"); ok && path != "-" && !filepath.IsAbs(path) && baseDir != "" {
+		bodyArg = "@" + filepath.Join(baseDir, path)
+	}
+
 	// nil stdin: run-file bodies never read from the process's stdin, so "@-"
 	// always fails with osclient.ErrNoStdin.
-	body, hasBody, err := osclient.ReadBody(spec.Body, nil)
+	body, hasBody, err := osclient.ReadBody(bodyArg, nil)
 	if err != nil {
 		return Call{}, fmt.Errorf("call %q (line %d): reading body: %w", name, line, err)
 	}
@@ -288,9 +413,10 @@ func buildCall(name string, line int, spec *callSpec) (Call, error) {
 	}, nil
 }
 
-// buildRetryConfig starts from config.Defaults().Retry so an omitted per-call
-// key can never drift from the flag-mode default, then overrides only the
-// keys spec sets explicitly.
+// buildRetryConfig parses spec's retry fields into a config.RetryConfig. The
+// string-encoded fields were pre-populated with the flag-mode defaults'
+// string forms in decodeCall, so they are parsed unconditionally here: an
+// explicit empty value fails exactly as it would in flag mode.
 func buildRetryConfig(name string, line int, spec *callSpec) (config.RetryConfig, error) {
 	cfg := config.Defaults().Retry
 
@@ -300,37 +426,29 @@ func buildRetryConfig(name string, line int, spec *callSpec) (config.RetryConfig
 	cfg.SuccessWhen = spec.SuccessWhen
 	cfg.Jitter = spec.BackoffJitter
 
-	if spec.Backoff != "" {
-		strategy, err := config.ParseBackoffStrategy(spec.Backoff)
-		if err != nil {
-			return config.RetryConfig{}, fmt.Errorf("call %q (line %d): backoff: %w", name, line, err)
-		}
-		cfg.Strategy = strategy
+	strategy, err := config.ParseBackoffStrategy(spec.Backoff)
+	if err != nil {
+		return config.RetryConfig{}, fmt.Errorf("call %q (line %d): backoff: %w", name, line, err)
 	}
+	cfg.Strategy = strategy
 
-	if spec.BackoffInitial != "" {
-		d, err := time.ParseDuration(spec.BackoffInitial)
-		if err != nil {
-			return config.RetryConfig{}, fmt.Errorf("call %q (line %d): backoff-initial: %w", name, line, err)
-		}
-		cfg.Initial = d
+	initial, err := time.ParseDuration(spec.BackoffInitial)
+	if err != nil {
+		return config.RetryConfig{}, fmt.Errorf("call %q (line %d): backoff-initial: %w", name, line, err)
 	}
+	cfg.Initial = initial
 
-	if spec.BackoffMax != "" {
-		d, err := time.ParseDuration(spec.BackoffMax)
-		if err != nil {
-			return config.RetryConfig{}, fmt.Errorf("call %q (line %d): backoff-max: %w", name, line, err)
-		}
-		cfg.Max = d
+	maxBackoff, err := time.ParseDuration(spec.BackoffMax)
+	if err != nil {
+		return config.RetryConfig{}, fmt.Errorf("call %q (line %d): backoff-max: %w", name, line, err)
 	}
+	cfg.Max = maxBackoff
 
-	if spec.MaxBodyBuffer != "" {
-		size, err := config.ParseSize(spec.MaxBodyBuffer)
-		if err != nil {
-			return config.RetryConfig{}, fmt.Errorf("call %q (line %d): max-body-buffer: %w", name, line, err)
-		}
-		cfg.MaxBodyBuffer = size
+	size, err := config.ParseSize(spec.MaxBodyBuffer)
+	if err != nil {
+		return config.RetryConfig{}, fmt.Errorf("call %q (line %d): max-body-buffer: %w", name, line, err)
 	}
+	cfg.MaxBodyBuffer = size
 
 	return cfg, nil
 }
