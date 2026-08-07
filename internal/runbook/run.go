@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 
 	"github.com/logmanager-oss/opensearch-api/internal/osclient"
 	"github.com/logmanager-oss/opensearch-api/internal/retry"
@@ -62,7 +63,7 @@ func (r *Runner) Run(ctx context.Context, rb *Runbook) error {
 			continue
 		}
 
-		err := r.runCall(ctx, rb, idx)
+		err := r.runCall(ctx, rb, idx, 0)
 		if err == nil {
 			outcomes[idx] = succeeded
 			continue
@@ -134,8 +135,12 @@ func unsucceededDep(rb *Runbook, call *Call, outcomes []outcome) (string, bool) 
 // runCall builds and executes the request for rb.Calls[idx], driving it
 // through a retry.Engine, logging its outcome to r.Progress, and returning a
 // call-qualified error (nil on success) so sentinels stay errors.Is-matchable.
-func (r *Runner) runCall(ctx context.Context, rb *Runbook, idx int) error {
+// depth is 0 for an entry call and depth+1 for each nested verify-with check;
+// it controls both the two-space indent and the "call"/"check" label of every
+// line runCall prints.
+func (r *Runner) runCall(ctx context.Context, rb *Runbook, idx, depth int) error {
 	call := &rb.Calls[idx]
+	prefix, label := indent(depth), callLabel(depth)
 
 	req, err := osclient.BuildRequest(r.Endpoint, osclient.RequestSpec{
 		Method:  call.Method,
@@ -146,8 +151,12 @@ func (r *Runner) runCall(ctx context.Context, rb *Runbook, idx int) error {
 		Headers: call.Headers,
 	})
 	if err != nil {
-		_, _ = fmt.Fprintf(r.Progress, "call %q: failed (%v)\n", call.Name, err)
-		return fmt.Errorf("call %q: %w", call.Name, err)
+		_, _ = fmt.Fprintf(r.Progress, "%s%s %q: failed (%v)\n", prefix, label, call.Name, err)
+		return fmt.Errorf("%s %q: %w", label, call.Name, err)
+	}
+
+	if call.VerifyWith != "" {
+		_, _ = fmt.Fprintf(r.Progress, "%s%s %q: %s %s\n", prefix, label, call.Name, call.Method, call.Path)
 	}
 
 	attempts := 0
@@ -170,7 +179,16 @@ func (r *Runner) runCall(ctx context.Context, rb *Runbook, idx int) error {
 		retry.WithWarn(r.Warn),
 	}
 	if r.Verbose {
-		opts = append(opts, retry.WithOnRetry(r.verboseHook(call.Name)))
+		opts = append(opts, retry.WithOnRetry(r.verboseHook(call.Name, prefix, label)))
+	}
+	if call.VerifyWith != "" {
+		checkIdx := rb.byName[call.VerifyWith]
+		// The check is a separate request on its own connection, so the outer
+		// response's body being left open (unclosed) by retry.Engine.Do while
+		// this runs is harmless.
+		opts = append(opts, retry.WithSuccessCheck(func(ctx context.Context) (bool, error) {
+			return r.runVerifyCheck(ctx, rb, checkIdx, depth)
+		}))
 	}
 
 	// The engine consumes only the compiled predicates passed as options;
@@ -195,40 +213,78 @@ func (r *Runner) runCall(ctx context.Context, rb *Runbook, idx int) error {
 	}
 
 	if doErr != nil {
-		_, _ = fmt.Fprintf(r.Progress, "call %q: failed (%s)\n", call.Name, outcomeDetail(status, attempts, doErr))
-		return fmt.Errorf("call %q: %w", call.Name, doErr)
+		_, _ = fmt.Fprintf(r.Progress, "%s%s %q: failed (%s)\n", prefix, label, call.Name, outcomeDetail(status, attempts, doErr))
+		return fmt.Errorf("%s %q: %w", label, call.Name, doErr)
 	}
 
-	_, _ = fmt.Fprintf(r.Progress, "call %q: ok (%s)\n", call.Name, outcomeDetail(status, attempts, nil))
+	_, _ = fmt.Fprintf(r.Progress, "%s%s %q: ok (%s)\n", prefix, label, call.Name, outcomeDetail(status, attempts, nil))
 	return nil
+}
+
+// runVerifyCheck runs the nested verify-with check at rb.Calls[checkIdx] one
+// level deeper than depth and maps its result to the (bool, error) shape
+// retry.WithSuccessCheck expects: success maps to (true, nil); exhausted
+// retries map to (false, nil) — "not yet", so the outer attempt just retries
+// per its own policy; every other failure (cancellation, the check's own
+// abort-on, a deterministic request-build error) maps to (false, err) so it
+// propagates out of the outer Do immediately instead of being retried forever.
+func (r *Runner) runVerifyCheck(ctx context.Context, rb *Runbook, checkIdx, depth int) (bool, error) {
+	err := r.runCall(ctx, rb, checkIdx, depth+1)
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, retry.ErrRetriesExhausted) {
+		return false, nil
+	}
+	return false, err
 }
 
 // verboseHook returns an OnRetry hook that reports each failed attempt of the
 // named call to r.Progress, mirroring the CLI's verbose request output.
-func (r *Runner) verboseHook(name string) func(retry.RetryInfo) {
+func (r *Runner) verboseHook(name, prefix, label string) func(retry.RetryInfo) {
 	return func(info retry.RetryInfo) {
 		if info.Err != nil {
-			_, _ = fmt.Fprintf(r.Progress, "call %q: attempt %d failed: %v; retrying in %s\n",
-				name, info.Attempt, info.Err, info.Delay)
+			_, _ = fmt.Fprintf(r.Progress, "%s%s %q: attempt %d failed: %v; retrying in %s\n",
+				prefix, label, name, info.Attempt, info.Err, info.Delay)
 			return
 		}
 		if info.Reason != "" {
-			_, _ = fmt.Fprintf(r.Progress, "call %q: attempt %d: status %d (%s); retrying in %s\n",
-				name, info.Attempt, info.Status, info.Reason, info.Delay)
+			_, _ = fmt.Fprintf(r.Progress, "%s%s %q: attempt %d: status %d (%s); retrying in %s\n",
+				prefix, label, name, info.Attempt, info.Status, info.Reason, info.Delay)
 			return
 		}
-		_, _ = fmt.Fprintf(r.Progress, "call %q: attempt %d: status %d; retrying in %s\n",
-			name, info.Attempt, info.Status, info.Delay)
+		_, _ = fmt.Fprintf(r.Progress, "%s%s %q: attempt %d: status %d; retrying in %s\n",
+			prefix, label, name, info.Attempt, info.Status, info.Delay)
 	}
+}
+
+// indent returns two spaces per depth, offsetting nested check lines under
+// the call they verify.
+func indent(depth int) string {
+	return strings.Repeat("  ", depth)
+}
+
+// callLabel returns "call" for an entry call (depth 0) or "check" for a
+// nested verify-with invocation (depth > 0).
+func callLabel(depth int) string {
+	if depth == 0 {
+		return "call"
+	}
+	return "check"
 }
 
 // outcomeDetail formats the parenthetical detail of a call's outcome line:
 // "status <code>, terminal" for an aborted status, "status <code>, N
 // attempts" otherwise, or the bare attempt count when no response was ever
-// received (a transport error).
+// received (a transport error). A terminal error with no status can only be
+// a propagated verify-with check abort — the call's own abort-on always has
+// its response's status — so it is labeled as the check's, not the call's.
 func outcomeDetail(status, attempts int, err error) string {
 	descriptor := attemptWord(attempts)
 	if errors.Is(err, retry.ErrTerminalStatus) {
+		if status == 0 {
+			return "check terminal"
+		}
 		descriptor = "terminal"
 	}
 	if status == 0 {
