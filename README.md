@@ -24,8 +24,10 @@ Shell completion (below) needs `osapi` on your `PATH`, so prefer `go install`.
 
 ## Usage
 
-`osapi` sends one request per invocation — the command itself is the request
-(there is no `request` subcommand). `osapi --version` prints the version.
+By default `osapi` sends one request per invocation — the command itself is the request (there is
+no `request` subcommand). The `run` subcommand instead executes an ordered sequence of calls
+defined in a YAML file (see [Run files](#run-files-osapi-run) below). `osapi --version` prints the
+version.
 
 ```sh
 # Cluster health, pretty-printed
@@ -46,6 +48,9 @@ osapi --path _cluster/health --retry -1 --success-when '.status == "green"'
 
 # Poll a long-running task: a 200 with "completed": false is a failure indicator, so keep retrying
 osapi --path _tasks/oTUltX4IQMOUUVeiohTt8A:12345 --retry -1 --retry-when '.completed == false'
+
+# Run an ordered sequence of calls defined in a YAML runbook
+osapi --endpoint https://localhost:9200 -k -u admin run runbook.yaml
 ```
 
 ### Flags
@@ -134,6 +139,141 @@ whatever is exported in the shell.
   `retries exhausted: --success-when not satisfied`.
 - The response body is **always** printed to stdout, including for failing responses, so you can
   inspect `4xx`/`5xx` payloads (or a body a predicate rejected).
+
+## Run files (osapi run)
+
+`osapi run <file.yaml>` executes an ordered sequence of calls against a single OpenSearch endpoint,
+defined in a YAML file. Connection flags/env work exactly as in single-request mode; the top-level
+`--retry`/`--backoff-*`/etc. flags do not apply here — each call gets its retry behaviour from its
+own YAML keys (defaulted the same way the flags default when a key is omitted).
+
+```sh
+osapi --endpoint https://localhost:9200 -k -u admin run runbook.yaml
+```
+
+### Schema
+
+Every entry under the top-level `calls:` mapping is a call name mapped to a spec of these keys:
+
+| Key               | Type                     | Default  | Description                                                        |
+| ----------------- | ------------------------ | -------- | ------------------------------------------------------------------- |
+| `path`            | string                   | required | request path, e.g. `_cluster/health`                               |
+| `method`          | string                   | `GET`    | HTTP method                                                         |
+| `body`            | string                   | none     | request body: literal string or `@file` (see below; `@-` stdin is not supported) |
+| `query`           | map of string to string  | none     | query parameters                                                    |
+| `headers`         | map of string to string  | none     | request headers                                                     |
+| `retry`           | int                      | `0`      | number of retries (`0` = none, `-1` = unlimited)                    |
+| `backoff`         | string                   | `linear` | backoff strategy: `constant`, `linear`, or `exponential`            |
+| `backoff-initial` | duration string          | `2s`     | initial backoff delay                                               |
+| `backoff-max`     | duration string          | `30s`    | maximum backoff delay                                               |
+| `backoff-jitter`  | float                    | `0`      | backoff jitter as a fraction in `[0,1)`                             |
+| `abort-on`        | list of int              | none     | status codes that stop retrying                                     |
+| `retry-when`      | string (jq expression)   | none     | truthy forces a retry even on a `2xx`                               |
+| `success-when`    | string (jq expression)   | none     | success only when truthy, regardless of status; mutually exclusive with `verify-with` |
+| `verify-with`     | string                   | none     | name of another call in the same file, used as a nested success check; mutually exclusive with `success-when` |
+| `depends-on`      | string or list of string | none     | prerequisite call name(s); must be defined earlier in the file      |
+| `stop-on-failure` | bool                     | `false`  | on failure, skip every remaining call instead of continuing         |
+| `max-body-buffer` | size string              | `10MiB`  | max body buffered for `retry-when`/`success-when` evaluation (`0` = unlimited)               |
+
+### Execution model
+
+- Calls run in document order. A call that is never anyone's own step — only ever used as another
+  call's `verify-with` target — is "check-only": it never runs on its own, only when invoked as a
+  nested check, and it is excluded from the run's summary counts.
+- Continuing on failure is the default: a failed call is recorded and the run moves on to the next
+  one. Set `stop-on-failure: true` on a call to instead skip every remaining call once it fails.
+- A call whose `depends-on` prerequisite did not succeed is skipped instead of run, and that skip
+  cascades to its own dependents in turn.
+- The run prints a final summary line to stderr, e.g. `run: 4 succeeded, 0 failed, 0 skipped`
+  (check-only calls are not counted). The process exits non-zero iff any call failed.
+
+### depends-on
+
+`depends-on` names one or more earlier calls that must have already succeeded. Targets must be
+defined earlier in the file (forward references are rejected at load time) and must be entry calls,
+not check-only `verify-with` targets. When a prerequisite has not succeeded — because it failed or
+was itself skipped — the dependent call is skipped (`call "<name>": skipped (needs <prereq>)`), and
+that skip cascades to whatever depends on it.
+
+### verify-with
+
+`verify-with: <other-call>` turns `<other-call>` into a nested success check for the call that
+references it:
+
+- On every attempt that gets a `2xx` response (and isn't already forced into a retry by a truthy
+  `retry-when`), the outer call doesn't succeed immediately — instead the check is run (with its
+  own retry policy), and only a successful check makes the outer attempt a success. A non-`2xx`
+  outer response is classified without ever running the check.
+- The check has its own retry budget, isolated from the outer call's. If the check's own retries are
+  exhausted ("not yet done"), the outer attempt just counts as a retry under its own policy. A check
+  with `retry: -1` therefore blocks: the outer attempt won't return until the check itself succeeds
+  or hits its own `abort-on`, since the check runs synchronously inside the outer attempt.
+- Any other check failure — its own `abort-on` firing, a malformed request — makes the outer call
+  terminal immediately, without waiting on the outer call's own retry budget: a nested `abort-on` in
+  effect terminates the outer call too.
+- A check-only call cannot itself have `depends-on` or `stop-on-failure`. Chains of checks (`a`
+  verifies via `b`, which verifies via `c`) are allowed; cycles are rejected at load time.
+
+### --dry-run
+
+`osapi run --dry-run <file.yaml>` prints the execution plan — each entry call in document order,
+with its method, path, and `depends-on`/`verify-with` wiring — to stderr and exits `0` without
+resolving connection settings, prompting for a password, or making any request.
+
+### stdout/stderr
+
+As in single-request mode, progress goes to **stderr**: one outcome line per call/check invocation
+(plus per-attempt lines with `-v`) and the final summary. Unlike single-request mode, **stdout is currently always empty** — it's reserved for
+a future `--output` flag that would print structured per-call results.
+
+### @file bodies
+
+A relative `@file` in a call's `body` resolves against the **runbook file's own directory**, so a
+runbook and the body files it references stay portable together regardless of where you run
+`osapi` from. Absolute paths are used as given. (This differs from `-d @file` in single-request
+mode, which resolves against the process's current working directory.)
+
+### Example
+
+```yaml
+calls:
+  create_index:
+    method: PUT
+    path: my-index
+    body: '{"settings":{"number_of_replicas":1}}'
+    success-when: '.acknowledged'
+    stop-on-failure: true
+
+  wait_for_ism:
+    method: GET
+    path: _plugins/_ism/explain/my-index
+    depends-on: create_index
+    retry: -1
+    abort-on: [404]
+    verify-with: verify_replicas
+
+  verify_replicas:
+    method: GET
+    path: my-index/_settings
+    retry: -1
+    success-when: '.["my-index"].settings.index.number_of_replicas == "1"'
+```
+
+`create_index` runs first and stops the whole run if it fails. `wait_for_ism` only runs once
+`create_index` has succeeded, polls the ISM explain endpoint indefinitely (aborting immediately on
+a `404` — the index is gone), and on every `2xx` defers to `verify_replicas` — itself polling
+indefinitely — before counting as done. `verify_replicas` is check-only: it never appears as its
+own step, only as `wait_for_ism`'s nested check.
+
+### Not in v1
+
+- Templating or variable substitution inside a runbook.
+- A file-level `defaults:` block shared across calls (each call defaults independently, from the
+  same baseline the flags use).
+- A per-call `timeout` key.
+- Stdin bodies (`@-`) — a runbook has no interactive stdin to read from.
+- Capturing a response from one call for use in another.
+- Combining `success-when` and `verify-with` on the same call.
 
 ## Passwords
 
