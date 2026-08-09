@@ -31,10 +31,14 @@ type Runner struct {
 // Stderr. The returned error has already been reported there; callers must
 // not print it again.
 func (r *Runner) Run(ctx context.Context, rb *Runbook) error {
+	// store is local to Run, not a Runner field, so a Runner stays reusable
+	// across repeated Run calls without one run's captures leaking into the
+	// next.
+	store := make(map[string]string)
 	var succeeded, tolerated int
 	for idx := range rb.Calls {
 		call := &rb.Calls[idx]
-		err := r.runCall(ctx, call)
+		err := r.runCall(ctx, call, store)
 		if err == nil {
 			succeeded++
 			continue
@@ -58,15 +62,29 @@ func (r *Runner) Run(ctx context.Context, rb *Runbook) error {
 	return nil
 }
 
-func (r *Runner) runCall(ctx context.Context, call *Call) error {
-	req, err := osclient.BuildRequest(r.Endpoint, osclient.RequestSpec{
-		Method:  call.Method,
-		Path:    call.Path,
-		Body:    call.Body,
-		HasBody: call.HasBody,
-		Query:   call.Query,
-		Headers: call.Headers,
-	})
+// attemptResult is what one finished retry loop produced: the response and
+// error the engine returned, plus the attempt count and last raw transport
+// error, neither of which retry.Do reports.
+type attemptResult struct {
+	attempts     int
+	resp         *http.Response
+	doErr        error
+	transportErr error
+}
+
+// runCall executes call under its retry policy. store carries values captured
+// by earlier calls in this Run; substituteCall resolves them into a
+// request-ready spec.
+func (r *Runner) runCall(ctx context.Context, call *Call, store map[string]string) error {
+	spec, err := substituteCall(call, store)
+	if err != nil {
+		// Named here: nothing was sent, so there is no status, attempts or body.
+		_, _ = fmt.Fprintf(r.Stderr, "call %q: failed (request not sent)%s: %v\n",
+			call.Name, toleratedSuffix(call), err)
+		return fmt.Errorf("call %q: %w", call.Name, err)
+	}
+
+	req, err := osclient.BuildRequest(r.Endpoint, spec)
 	if err != nil {
 		// Named here: nothing was sent, so there is no status, attempts or body.
 		_, _ = fmt.Fprintf(r.Stderr, "call %q: failed (request not sent)%s: %v\n",
@@ -104,47 +122,143 @@ func (r *Runner) runCall(ctx context.Context, call *Call) error {
 		return attemptResp, attemptErr
 	})
 
-	return r.reportOutcome(ctx, call, attempts, resp, doErr, transportErr)
+	return r.reportOutcome(ctx, call, attemptResult{attempts: attempts, resp: resp, doErr: doErr, transportErr: transportErr}, store)
 }
 
-// reportOutcome writes the outcome line and always drains/closes resp exactly
-// once. A context error is left unreported: only Run's summary names it.
-func (r *Runner) reportOutcome(ctx context.Context, call *Call, attempts int, resp *http.Response, doErr, transportErr error) error {
-	if doErr == nil {
-		drainDiscard(resp)
-		_, _ = fmt.Fprintf(r.Stderr, "call %q: ok (status %d, %d %s)\n",
-			call.Name, resp.StatusCode, attempts, attemptWord(attempts))
-		return nil
+// substituteCall resolves ${name} references in call's path, query, headers
+// and body against store, returning a fresh osclient.RequestSpec built from
+// copies — never call's own strings, so a reused Runner (or a second Run)
+// still sees the call's raw templated strings untouched. Only path
+// substitution can fail: a captured value that would repoint the request at a
+// different endpoint or inject query parameters.
+func substituteCall(call *Call, store map[string]string) (osclient.RequestSpec, error) {
+	path, err := substitutePath(call.Path, store)
+	if err != nil {
+		return osclient.RequestSpec{}, err
 	}
 
-	if isContextErr(ctx, doErr) {
-		drainDiscard(resp)
-		return fmt.Errorf("call %q: %w", call.Name, doErr)
+	spec := osclient.RequestSpec{Method: call.Method, Path: path, HasBody: call.HasBody}
+
+	if len(call.Query) > 0 {
+		spec.Query = make(map[string]string, len(call.Query))
+		for k, v := range call.Query {
+			spec.Query[k] = substitute(v, store)
+		}
 	}
 
-	r.writeFailure(call, attempts, resp, doErr, transportErr)
-	return fmt.Errorf("call %q: %w", call.Name, doErr)
+	if len(call.Headers) > 0 {
+		spec.Headers = make(http.Header, len(call.Headers))
+		for k, values := range call.Headers {
+			substituted := make([]string, len(values))
+			for i, v := range values {
+				substituted[i] = substitute(v, store)
+			}
+			spec.Headers[k] = substituted
+		}
+	}
+
+	if call.HasBody {
+		if bytes.Contains(call.Body, []byte("${")) {
+			spec.Body = []byte(substitute(string(call.Body), store))
+		} else {
+			// BuildRequest only ever reads spec.Body, never mutates it, so an
+			// untemplated body can share call.Body's backing array instead of
+			// being copied twice per call.
+			spec.Body = call.Body
+		}
+	}
+
+	return spec, nil
 }
 
-func (r *Runner) writeFailure(call *Call, attempts int, resp *http.Response, doErr, transportErr error) {
+// reportOutcome writes the outcome line and always drains/closes ar.resp
+// exactly once. A context error is left unreported: only Run's summary
+// names it.
+func (r *Runner) reportOutcome(ctx context.Context, call *Call, ar attemptResult, store map[string]string) error {
+	if ar.doErr == nil {
+		return r.reportSuccess(ctx, call, ar, store)
+	}
+
+	if isContextErr(ctx, ar.doErr) {
+		drainDiscard(ar.resp)
+		return fmt.Errorf("call %q: %w", call.Name, ar.doErr)
+	}
+
+	r.writeFailure(call, ar)
+	return fmt.Errorf("call %q: %w", call.Name, ar.doErr)
+}
+
+// reportSuccess writes the "ok" line for a successful attempt, or — for a
+// capturing call whose capture cannot be extracted — a failure line echoing
+// the response body: the body is the diagnosis for "matched nothing" and
+// "not a scalar". Capture runs before the ok line is written, so a call
+// whose capture fails never prints ok followed by an error.
+func (r *Runner) reportSuccess(ctx context.Context, call *Call, ar attemptResult, store map[string]string) error {
+	var body []byte
+	var captureErr error
+	if len(call.Capture) == 0 {
+		drainDiscard(ar.resp)
+	} else if body, captureErr = r.captureFromResponse(ctx, call, ar.resp, store); captureErr != nil {
+		if isContextErr(ctx, captureErr) {
+			return fmt.Errorf("call %q: %w", call.Name, captureErr)
+		}
+		_, _ = fmt.Fprintf(r.Stderr, "call %q: failed (status %d, %d %s)%s: %v\n",
+			call.Name, ar.resp.StatusCode, ar.attempts, attemptWord(ar.attempts), toleratedSuffix(call), captureErr)
+		writeIndented(r.Stderr, body)
+		return fmt.Errorf("call %q: %w", call.Name, captureErr)
+	}
+
+	_, _ = fmt.Fprintf(r.Stderr, "call %q: ok (status %d, %d %s)\n",
+		call.Name, ar.resp.StatusCode, ar.attempts, attemptWord(ar.attempts))
+	return nil
+}
+
+// captureFromResponse reads resp's body bounded by call's max-body-buffer —
+// the same helper used for the failing-body echo, so max-body-buffer: 0/
+// MaxInt64 mean unlimited here too — extracts every capture in document
+// order into store, and, with Verbose, logs each as name=value. When the call
+// also carries a predicate, the engine has already buffered the body once
+// (retry.go bufferBody); this read is a second, bounded copy of it. The
+// bytes are returned alongside any error so reportSuccess can echo them on a
+// capture failure without a second read of the now-closed body.
+func (r *Runner) captureFromResponse(ctx context.Context, call *Call, resp *http.Response, store map[string]string) ([]byte, error) {
+	data, truncated, err := readBounded(resp.Body, call.Retry.MaxBodyBuffer)
+	_ = resp.Body.Close()
+	if err != nil {
+		return nil, fmt.Errorf("reading response body: %w", err)
+	}
+
+	if err := extractCaptures(ctx, call.Capture, data, truncated, call.Retry.MaxBodyBuffer, store); err != nil {
+		return data, err
+	}
+
+	if r.Verbose {
+		for _, c := range call.Capture {
+			_, _ = fmt.Fprintf(r.Stderr, "%s=%s\n", c.Name, store[c.Name])
+		}
+	}
+	return nil, nil
+}
+
+func (r *Runner) writeFailure(call *Call, ar attemptResult) {
 	suffix := toleratedSuffix(call)
 
 	// resp is nil on both a transport error and a failed body read; labeling
 	// the latter "transport error" would point diagnosis at the network.
-	if resp == nil && transportErr != nil {
+	if ar.resp == nil && ar.transportErr != nil {
 		_, _ = fmt.Fprintf(r.Stderr, "call %q: failed (transport error, %d %s)%s: %v\n",
-			call.Name, attempts, attemptWord(attempts), suffix, transportErr)
+			call.Name, ar.attempts, attemptWord(ar.attempts), suffix, ar.transportErr)
 		return
 	}
-	if resp == nil {
+	if ar.resp == nil {
 		_, _ = fmt.Fprintf(r.Stderr, "call %q: failed (%s, %d %s)%s\n",
-			call.Name, failureDetail(doErr), attempts, attemptWord(attempts), suffix)
+			call.Name, failureDetail(ar.doErr), ar.attempts, attemptWord(ar.attempts), suffix)
 		return
 	}
 
 	_, _ = fmt.Fprintf(r.Stderr, "call %q: failed (status %d, %s, %d %s)%s\n",
-		call.Name, resp.StatusCode, failureDetail(doErr), attempts, attemptWord(attempts), suffix)
-	r.echoBody(resp, call.Retry.MaxBodyBuffer)
+		call.Name, ar.resp.StatusCode, failureDetail(ar.doErr), ar.attempts, attemptWord(ar.attempts), suffix)
+	r.echoBody(ar.resp, call.Retry.MaxBodyBuffer)
 }
 
 func toleratedSuffix(call *Call) string {

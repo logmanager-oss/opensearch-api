@@ -9,11 +9,15 @@ import (
 	"io"
 	"maps"
 	"net/http"
+	"net/textproto"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
+	"strings"
 	"time"
 
+	"github.com/itchyny/gojq"
 	"gopkg.in/yaml.v3"
 
 	"github.com/logmanager-oss/opensearch-api/internal/config"
@@ -36,6 +40,28 @@ type Call struct {
 	RetryWhen          *retry.Predicate
 	SuccessWhen        *retry.Predicate
 	ContinueOnFailure  bool
+	Capture            []Capture // document order; empty when the call captures nothing
+}
+
+// Capture is one name: jq-expression pair from a call's capture: mapping.
+// Expr is the source text, kept for error messages; code is its compiled
+// form and stays unexported so only this package evaluates it.
+// internal/runbook compiles its own rather than reusing retry.Predicate:
+// Predicate.match loops for a truthy value while a capture takes the first
+// emitted value, and Predicate's expr/code fields are unexported, so neither
+// the iteration contract nor the type fits.
+type Capture struct {
+	Name string
+	Expr string
+	code *gojq.Code
+}
+
+// capDecl records where a capture name was declared, for validating later
+// ${name} references: the declaring call's name (for error messages) and
+// whether it tolerates failure, which would leave the capture unset.
+type capDecl struct {
+	callName          string
+	continueOnFailure bool
 }
 
 // Runbook stays a struct rather than a bare []Call so a future top-level key
@@ -47,8 +73,9 @@ type Runbook struct {
 // callSpec is the YAML decode target for a call or the defaults block.
 // Durations and sizes decode as strings: yaml.v3 does not parse "2s" into
 // time.Duration, so they are parsed via time.ParseDuration / config.ParseSize
-// after decode. "capture" has no field here on purpose — Section 3 adds its
-// name-to-jq parsing; for now it is accepted as a key and its value ignored.
+// after decode. "capture" has no field here on purpose: a map field would not
+// preserve document order, so loadCall parses it straight from the yaml.Node
+// via rawNodeField/parseCaptures instead.
 type callSpec struct {
 	Name              string            `yaml:"name"`
 	Method            string            `yaml:"method"`
@@ -102,9 +129,18 @@ func Load(r io.Reader, baseDir string) (*Runbook, error) {
 		return nil, err
 	}
 
+	// l.declared accumulates capture names as calls are built, in document
+	// order, so a ${name} reference is checked against exactly the captures
+	// declared by earlier calls — the walk that makes forward references and
+	// cycles structurally impossible without a graph.
+	l := &loader{
+		baseDir:  baseDir,
+		defaults: &defaultsSpec,
+		declared: make(map[string]capDecl, len(doc.Calls.Content)),
+	}
 	calls := make([]Call, len(doc.Calls.Content))
 	for i, item := range doc.Calls.Content {
-		call, err := loadCall(item, baseDir, &defaultsSpec)
+		call, err := l.call(item)
 		if err != nil {
 			return nil, err
 		}
@@ -112,6 +148,16 @@ func Load(r io.Reader, baseDir string) (*Runbook, error) {
 	}
 
 	return &Runbook{Calls: calls}, nil
+}
+
+// loader carries the state Load threads through every call: baseDir and
+// defaults are fixed for the whole runbook, and declared accumulates as
+// calls are built. Bundling them here is what keeps loader.call itself down
+// to a single parameter.
+type loader struct {
+	baseDir  string
+	defaults *callSpec
+	declared map[string]capDecl
 }
 
 // LoadFile opens path and loads it with baseDir = filepath.Dir(path). The CLI
@@ -161,9 +207,7 @@ func rejectDuplicateNames(items []*yaml.Node) error {
 	return nil
 }
 
-// callAllowedKeys are the per-call keys accepted by the loader. "capture" is
-// accepted here so a runbook using it still loads; Section 3 adds its
-// name-to-jq parsing and validation.
+// callAllowedKeys are the per-call keys accepted by the loader.
 var callAllowedKeys = map[string]bool{
 	"name": true, "method": true, "path": true, "body": true,
 	"query": true, "headers": true, "retry": true, "backoff": true,
@@ -265,7 +309,9 @@ func nodeKindName(k yaml.Kind) string {
 	}
 }
 
-func loadCall(item *yaml.Node, baseDir string, defaults *callSpec) (Call, error) {
+// call builds one Call from item, layering it onto l.defaults. l.declared
+// accumulates capture names across the whole Load call, in document order.
+func (l *loader) call(item *yaml.Node) (Call, error) {
 	name := rawStringField(item, "name")
 	ref := callRef(name, item.Line)
 
@@ -291,13 +337,13 @@ func loadCall(item *yaml.Node, baseDir string, defaults *callSpec) (Call, error)
 	// defaults) and "Content-Type" (from the call) as two distinct keys, and
 	// http.Header.Set calls on both would let map-iteration order pick the
 	// winner.
-	spec := *defaults
-	spec.Query = maps.Clone(defaults.Query)
+	spec := *l.defaults
+	spec.Query = maps.Clone(l.defaults.Query)
 	spec.Headers = nil
 	if err := item.Decode(&spec); err != nil {
 		return Call{}, fmt.Errorf("%s: %w", ref, err)
 	}
-	headers := mergeHeaders(defaults.Headers, spec.Headers)
+	headers := mergeHeaders(l.defaults.Headers, spec.Headers)
 	if spec.Name == "" {
 		return Call{}, fmt.Errorf("%s: missing required key %q", ref, "name")
 	}
@@ -308,7 +354,52 @@ func loadCall(item *yaml.Node, baseDir string, defaults *callSpec) (Call, error)
 		return Call{}, fmt.Errorf("%s: %w", ref, err)
 	}
 
-	bodyArg, err := resolveBodyArg(spec.Body, baseDir)
+	captures, err := parseCaptures(rawNodeField(item, "capture"), ref)
+	if err != nil {
+		return Call{}, err
+	}
+
+	// path can never be defaults-inherited: defaultsAllowedKeys forbids it.
+	if err := checkRefs(spec.Path, l.declared, ref, false); err != nil {
+		return Call{}, err
+	}
+
+	queryNode := rawNodeField(item, "query")
+	// Sorted so a call with several bad references always names the same one.
+	for _, k := range slices.Sorted(maps.Keys(spec.Query)) {
+		if err := rejectRefInKey(k, ref, "query"); err != nil {
+			return Call{}, err
+		}
+		if err := checkRefs(spec.Query[k], l.declared, ref, !mappingHasKey(queryNode, k)); err != nil {
+			return Call{}, err
+		}
+	}
+
+	// Sorted for the same reason as the query loop above. Unlike Query,
+	// headers keep defaults separate (mergeHeaders), so own and inherited
+	// values are checked in two passes; an inherited value is skipped when an
+	// own key overrides it canonically — an overridden default never ships.
+	for _, k := range slices.Sorted(maps.Keys(spec.Headers)) {
+		if err := rejectRefInKey(k, ref, "header"); err != nil {
+			return Call{}, err
+		}
+		if err := checkRefs(spec.Headers[k], l.declared, ref, false); err != nil {
+			return Call{}, err
+		}
+	}
+	for _, k := range slices.Sorted(maps.Keys(l.defaults.Headers)) {
+		if err := rejectRefInKey(k, ref, "header"); err != nil {
+			return Call{}, err
+		}
+		if headerOverridden(spec.Headers, k) {
+			continue
+		}
+		if err := checkRefs(l.defaults.Headers[k], l.declared, ref, true); err != nil {
+			return Call{}, err
+		}
+	}
+
+	bodyArg, err := resolveBodyArg(spec.Body, l.baseDir)
 	if err != nil {
 		return Call{}, fmt.Errorf("%s: %w", ref, err)
 	}
@@ -317,6 +408,10 @@ func loadCall(item *yaml.Node, baseDir string, defaults *callSpec) (Call, error)
 	body, hasBody, err := osclient.ReadBody(bodyArg, nil)
 	if err != nil {
 		return Call{}, fmt.Errorf("%s: reading body: %w", ref, err)
+	}
+	bodyOwn := rawNodeField(item, "body") != nil
+	if err := checkRefs(string(body), l.declared, bodyRef(ref, bodyArg), !bodyOwn); err != nil {
+		return Call{}, err
 	}
 
 	retryCfg, err := buildRetryConfig(&spec)
@@ -333,6 +428,19 @@ func loadCall(item *yaml.Node, baseDir string, defaults *callSpec) (Call, error)
 		return Call{}, fmt.Errorf("%s: success-when: %w", ref, err)
 	}
 
+	// Registered only once the call is otherwise valid, and after its own
+	// references were checked against the captures declared so far — a call
+	// can reference an earlier capture but never one of its own.
+	for _, c := range captures {
+		if prev, ok := l.declared[c.Name]; ok {
+			if prev.callName == spec.Name {
+				return Call{}, fmt.Errorf("capture %q: declared twice by %s", c.Name, ref)
+			}
+			return Call{}, fmt.Errorf("capture %q: declared by call %q and by %s", c.Name, prev.callName, ref)
+		}
+		l.declared[c.Name] = capDecl{callName: spec.Name, continueOnFailure: spec.ContinueOnFailure}
+	}
+
 	return Call{
 		Name:              spec.Name,
 		Method:            spec.Method,
@@ -345,6 +453,7 @@ func loadCall(item *yaml.Node, baseDir string, defaults *callSpec) (Call, error)
 		RetryWhen:         retryWhen,
 		SuccessWhen:       successWhen,
 		ContinueOnFailure: spec.ContinueOnFailure,
+		Capture:           captures,
 	}, nil
 }
 
@@ -442,6 +551,17 @@ func mergeHeaders(defaults, own map[string]string) http.Header {
 	return h
 }
 
+// headerOverridden reports whether own sets a header canonically equal to
+// key, making the inherited default value dead.
+func headerOverridden(own map[string]string, key string) bool {
+	for k := range own {
+		if textproto.CanonicalMIMEHeaderKey(k) == textproto.CanonicalMIMEHeaderKey(key) {
+			return true
+		}
+	}
+	return false
+}
+
 // resolveBodyArg rewrites a relative "@file" body argument against baseDir so
 // osclient.ReadBody sees an absolute-enough path. "@-" (stdin), literal
 // bodies and already-absolute "@file" paths pass through untouched.
@@ -472,13 +592,8 @@ func callRef(name string, line int) string {
 // ahead of the allowed-key check and struct decode, so error messages can
 // name the call even when its keys are invalid.
 func rawStringField(node *yaml.Node, key string) string {
-	if node.Kind != yaml.MappingNode {
-		return ""
-	}
-	for i := 0; i+1 < len(node.Content); i += 2 {
-		if node.Content[i].Value == key {
-			return node.Content[i+1].Value
-		}
+	if v := rawNodeField(node, key); v != nil {
+		return v.Value
 	}
 	return ""
 }
@@ -494,4 +609,126 @@ func checkAllowedKeys(node *yaml.Node, allowed map[string]bool, ref string) erro
 		}
 	}
 	return nil
+}
+
+// rawNodeField returns the raw value node for key in a mapping node, or nil
+// if the key is absent, ahead of the allowed-key check and struct decode so
+// error messages can name the call even when its keys are invalid. Used
+// directly for capture: (callSpec has no Capture field: a map field would
+// not preserve document order) and as the shared walk beneath
+// rawStringField, and to tell whether a call sets a given key itself versus
+// inheriting it from defaults: (checkRefs' inherited parameter).
+func rawNodeField(node *yaml.Node, key string) *yaml.Node {
+	if node.Kind != yaml.MappingNode {
+		return nil
+	}
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		if node.Content[i].Value == key {
+			return node.Content[i+1]
+		}
+	}
+	return nil
+}
+
+// mappingHasKey reports whether node — a mapping node, or nil when the key
+// it would belong to is absent from the call altogether — itself declares
+// key, as opposed to key having reached the merged spec only through
+// defaults: layering.
+func mappingHasKey(node *yaml.Node, key string) bool {
+	if node == nil || node.Kind != yaml.MappingNode {
+		return false
+	}
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		if node.Content[i].Value == key {
+			return true
+		}
+	}
+	return false
+}
+
+// captureNameRe restricts a capture name to a jq-safe, referenceable
+// identifier: unrestricted names could produce one nobody could ever write
+// as ${name} again (e.g. a name containing "}" or a space).
+var captureNameRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+// parseCaptures parses the capture: mapping in document order, validating
+// each name and compiling each expression. A nil node (no capture: key)
+// yields a nil slice.
+func parseCaptures(node *yaml.Node, ref string) ([]Capture, error) {
+	if node == nil {
+		return nil, nil
+	}
+	if node.Kind != yaml.MappingNode {
+		return nil, fmt.Errorf("%s: capture: must be a mapping", ref)
+	}
+
+	captures := make([]Capture, 0, len(node.Content)/2)
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		name := node.Content[i].Value
+		if !captureNameRe.MatchString(name) {
+			return nil, fmt.Errorf("%s: capture %q: name must match %s", ref, name, captureNameRe.String())
+		}
+		expr := node.Content[i+1].Value
+		compiled, err := compileCapture(name, expr)
+		if err != nil {
+			return nil, fmt.Errorf("%s: capture %q: %w", ref, name, err)
+		}
+		captures = append(captures, compiled)
+	}
+	return captures, nil
+}
+
+// rejectRefInKey rejects a "${" in a query or header key: only a value can
+// be substituted (checkRefs covers values), so a key containing one would
+// ship a literal, unresolved "${...}" to the server with no load-time
+// warning.
+func rejectRefInKey(key, ref, field string) error {
+	if strings.Contains(key, "${") {
+		return fmt.Errorf("%s: %s key %q: references are not supported in query/header keys", ref, field, key)
+	}
+	return nil
+}
+
+// checkRefs validates every ${name} reference in s against declared — the
+// capture names known by the time the referencing call is reached — naming
+// ref in any error. It does not distinguish an unknown name from a forward
+// reference: from a left-to-right walk of the runbook the two look
+// identical, and rejecting both is what makes a capture cycle structurally
+// impossible without a graph walk. inherited marks s as reached via
+// defaults: layering rather than set on the call itself, which the error
+// text then says explicitly instead of pointing at a line inside defaults:
+// with no indication of how it got there.
+func checkRefs(s string, declared map[string]capDecl, ref string, inherited bool) error {
+	source := ""
+	if inherited {
+		source = " (inherited from defaults:)"
+	}
+	_, err := scanTemplate(s, func(name string) (string, error) {
+		decl, ok := declared[name]
+		switch {
+		case !ok:
+			return "", fmt.Errorf("references ${%s}%s, which is not a capture declared by an earlier call", name, source)
+		case decl.continueOnFailure:
+			return "", fmt.Errorf(
+				"references ${%s}%s, captured by call %q, which sets continue-on-failure: true"+
+					" — a tolerated failure would leave ${%s} unset",
+				name, source, decl.callName, name)
+		}
+		return "", nil
+	})
+	if err != nil {
+		return fmt.Errorf("%s: %w", ref, err)
+	}
+	return nil
+}
+
+// bodyRef augments ref with the resolved @file path when bodyArg names one,
+// so a reference error inside the file names where in the file tree to look
+// rather than just the call — the file's own line numbers are not tracked,
+// but the resolved path alone is normally enough to find it.
+func bodyRef(ref, bodyArg string) string {
+	if len(bodyArg) < 2 || bodyArg[0] != '@' || bodyArg == "@-" {
+		return ref
+	}
+	return fmt.Sprintf("%s (body file %q)", ref, bodyArg[1:])
 }
