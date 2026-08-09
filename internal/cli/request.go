@@ -17,9 +17,10 @@ import (
 	"github.com/logmanager-oss/opensearch-api/internal/retry"
 )
 
-// requestFlags holds the request subcommand's flags: connection settings plus
-// the request itself.
-type requestFlags struct {
+// connFlags holds the flags every command needs regardless of what it sends:
+// how to reach the cluster, plus verbose and env-file, which are not strictly
+// connection settings but travel with the same group for the same reason.
+type connFlags struct {
 	endpoint string
 	username string
 	password string
@@ -27,6 +28,38 @@ type requestFlags struct {
 	insecure bool
 	verbose  bool
 	envFile  string
+}
+
+// registerConnFlags declares the connection flags on cmd. Shorthands are part
+// of the contract, not cosmetic: in `osapi --endpoint ... run f.yaml` cobra
+// only uses root's flags to skip over flag arguments while locating the
+// subcommand, then hands the remaining args — flags included — to that
+// subcommand's flagset. So every name and shorthand must match root's exactly,
+// or the leading flags fail to parse.
+func registerConnFlags(cmd *cobra.Command, c *connFlags) {
+	f := cmd.Flags()
+	f.StringVar(&c.endpoint, config.FieldEndpoint, "",
+		"OpenSearch endpoint URL (e.g. https://localhost:9200)")
+	f.StringVarP(&c.username, config.FieldUsername, "u", "",
+		"username for basic authentication")
+	f.StringVar(&c.password, config.FieldPassword, "",
+		"password for basic auth (visible in ps output and shell history; "+
+			"prefer OPENSEARCH_PASSWORD, --env-file, or the interactive prompt)")
+	f.StringVar(&c.caCert, config.FieldCACert, "",
+		"verify the server's TLS certificate against this CA bundle (PEM) instead "+
+			"of the system roots; use it for a private/self-signed cluster CA")
+	f.BoolVarP(&c.insecure, config.FieldInsecure, "k", false,
+		"skip TLS certificate verification")
+	f.BoolVarP(&c.verbose, "verbose", "v", false,
+		"print per-attempt retry detail to stderr")
+	f.StringVar(&c.envFile, "env-file", "",
+		"path to a dotenv file providing OPENSEARCH_URL/USERNAME/PASSWORD")
+}
+
+// requestFlags holds the root command's flags: the connection settings plus
+// the request itself.
+type requestFlags struct {
+	connFlags
 
 	method         string
 	path           string
