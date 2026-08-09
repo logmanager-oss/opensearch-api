@@ -2,6 +2,7 @@ package runbook
 
 import (
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -323,16 +324,17 @@ func TestLoadInvalidFieldValues(t *testing.T) {
 }
 
 // A method that is a valid HTTP token, or an omitted method, must keep
-// loading: validation must accept exactly what osclient.BuildRequest ->
-// http.NewRequest will accept downstream, not a stricter set.
+// loading: validation must accept whatever osclient.BuildRequest ->
+// http.NewRequest accepts downstream, not a stricter set.
 func TestLoadValidMethodTokens(t *testing.T) {
 	tests := []struct {
 		name   string
 		method string
+		want   string // resolved Call.Method: an omitted method resolves to GET at load
 	}{
-		{name: "lowercase standard verb", method: "get"},
-		{name: "custom RFC 7230 token", method: "PURGE"},
-		{name: "omitted method defaults to GET downstream", method: ""},
+		{name: "lowercase standard verb", method: "get", want: "get"},
+		{name: "custom RFC 7230 token", method: "PURGE", want: "PURGE"},
+		{name: "omitted method defaults to GET at load", method: "", want: http.MethodGet},
 	}
 
 	for _, tt := range tests {
@@ -345,7 +347,7 @@ func TestLoadValidMethodTokens(t *testing.T) {
 			rb, err := Load(strings.NewReader(src), "")
 			require.NoError(t, err)
 			require.Len(t, rb.Calls, 1)
-			assert.Equal(t, tt.method, rb.Calls[0].Method)
+			assert.Equal(t, tt.want, rb.Calls[0].Method)
 		})
 	}
 }
@@ -438,8 +440,8 @@ calls:
 }
 
 // Defaults must layer for every key kind, not just the two scalars the happy
-// path covers, and a call's own query/headers must not leak into later calls —
-// yaml.v3 decodes a mapping into an existing non-nil map in place.
+// path covers. A call's own query/headers must not leak into later calls,
+// since yaml.v3 decodes a mapping into an existing non-nil map in place.
 func TestLoadDefaultsLayeringAcrossKeyKinds(t *testing.T) {
 	src := `
 defaults:
@@ -490,12 +492,12 @@ calls:
 		"the previous call's headers must not leak forward")
 }
 
-// A call's header must win over a same-named default header regardless of
-// letter-case spelling on either side. Both spellings canonicalize to the
-// same textproto key, and the old decode-in-place merge kept both as distinct
-// map[string]string entries — buildHeaders then Set both, so the survivor
-// depended on map iteration order. Looped: a single load passes ~88% of the
-// time under the old bug, so one iteration would not reliably pin it.
+// A call's header must beat a same-named default regardless of case. Both
+// spellings canonicalize to the same textproto key. The old decode-in-place
+// merge kept them as distinct map[string]string entries, so Set's survivor
+// depended on map-iteration order. This loops because a single load passed
+// under the old bug about 88% of the time, too unreliable to catch in one
+// iteration.
 func TestLoadCallHeaderOverridesDefaultRegardlessOfCase(t *testing.T) {
 	src := `
 defaults:
@@ -520,8 +522,7 @@ calls:
 // Headers keep defaults separate from the call's own (mergeHeaders), so
 // inherited values get their own reference-check pass. An unresolvable ref
 // in a defaults header fails the load, unless the call overrides that
-// header by canonical name (any case spelling) — then the default never
-// ships and isn't checked.
+// header by canonical name: then the default never ships and isn't checked.
 func TestLoadInheritedHeaderRefs(t *testing.T) {
 	src := `
 defaults:
@@ -540,7 +541,7 @@ calls:
 	require.NoError(t, err, "an overridden default header must not be ref-checked")
 }
 
-// capture: parses in document order; a call without it has an
+// capture: parses in document order. A call without it has an
 // empty slice.
 func TestLoadCaptureParsesInDocumentOrder(t *testing.T) {
 	src := `
@@ -747,7 +748,7 @@ calls:
 }
 
 // ${name} in path, query value, header value and body all
-// validate; $${literal} is accepted and does not count as a reference.
+// validate. $${literal} is accepted and does not count as a reference.
 func TestLoadReferenceInEveryField(t *testing.T) {
 	src := `
 calls:
@@ -801,12 +802,11 @@ calls:
 	assert.InDelta(t, 0.25, rb.Calls[0].Retry.Jitter, 1e-9)
 }
 
-// An invalid value in defaults: must fail the load attributed to defaults
-// itself (line + offending key + underlying parse error), the same way an
-// invalid per-call value is attributed to the call — never to whichever call
-// happens not to override the bad key. loadDefaults decodes the block but,
-// before this fix, never parsed/validated it: parsing only happened per-call,
-// so an invalid default surfaced (misattributed) on the first call lacking an
+// An invalid defaults: value must fail the load attributed to defaults
+// itself (line, key, and parse error), the same way a per-call value is
+// attributed to its call, never to whichever call doesn't override the bad
+// key. Before this fix, loadDefaults decoded the block but never validated
+// it: an invalid default surfaced misattributed to the first call lacking an
 // override, or not at all if every call happened to override it.
 func TestLoadDefaultsInvalidFieldValues(t *testing.T) {
 	tests := []struct {
@@ -837,10 +837,10 @@ func TestLoadDefaultsInvalidFieldValues(t *testing.T) {
 }
 
 // The escape defect: an invalid default that every call happens to override
-// must still fail the load. Before this fix it loaded cleanly — the bad
-// default value was never parsed because no call fell through to it — so
-// adding an innocent new call later that omits the override would suddenly
-// surface an error that was always latent in the runbook.
+// must still fail the load. Before this fix it loaded cleanly, since the bad
+// value was never parsed when no call fell through to it. Adding an
+// innocent later call that omits the override would then surface an error
+// that was always latent in the runbook.
 func TestLoadDefaultsInvalidValueEscapesWhenEveryCallOverridesIt(t *testing.T) {
 	src := `
 defaults:
@@ -891,4 +891,12 @@ func TestLoadFileSetsBaseDirFromFileDir(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, rb.Calls, 1)
 	assert.Equal(t, []byte(`{"in":"filedir"}`), rb.Calls[0].Body)
+}
+
+// An omitted method: resolves to GET at load, not left to net/http's
+// implicit default (see Call.Method's assignment in loader.call).
+func TestLoadDefaultsMethodToGet(t *testing.T) {
+	rb, err := Load(strings.NewReader("calls:\n  - name: c\n    path: /x\n"), "")
+	require.NoError(t, err)
+	assert.Equal(t, http.MethodGet, rb.Calls[0].Method)
 }

@@ -1,6 +1,7 @@
 // Package cli builds the osapi command: a resilient client for OpenSearch REST
-// endpoints with configurable retry. osapi is a single-purpose tool, so the root
-// command itself sends the request (there is no "request" subcommand).
+// endpoints with configurable retry. The root command itself sends a single
+// request. There is no separate "request" subcommand. The "run" subcommand
+// instead runs a declarative multi-call runbook.
 package cli
 
 import (
@@ -68,5 +69,6 @@ func NewRootCommand(version string) *cobra.Command {
 
 	registerCompletion(root, qf)
 	_ = root.MarkFlagRequired("path")
+	root.AddCommand(newRunCommand())
 	return root
 }

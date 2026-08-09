@@ -158,15 +158,10 @@ func runRequest(cmd *cobra.Command, qf *requestFlags) error {
 // resolveConfig merges flags, env file, process env and defaults, compiles
 // the body predicates, then resolves the password (prompting only on a TTY).
 func resolveConfig(cmd *cobra.Command, qf *requestFlags) (_ config.Config, retryWhen, successWhen *retry.Predicate, _ error) {
-	var fileVars map[string]string
-	if qf.envFile != "" {
-		vars, err := config.LoadEnvFile(qf.envFile)
-		if err != nil {
-			return config.Config{}, nil, nil, err
-		}
-		fileVars = vars
+	env, err := loadEnv(qf.envFile)
+	if err != nil {
+		return config.Config{}, nil, nil, err
 	}
-	env := config.LayeredEnv(fileVars, os.LookupEnv)
 
 	strategy, err := config.ParseBackoffStrategy(qf.backoff)
 	if err != nil {
