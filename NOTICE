@@ -16,3 +16,9 @@ This product bundles gojq, used for --retry-when/--success-when predicates.
   Source:  https://github.com/itchyny/gojq
   License: MIT License
   Version: v0.12.19
+
+This product bundles gopkg.in/yaml.v3, used for runbook file parsing.
+
+  Source:  https://github.com/go-yaml/yaml
+  License: MIT License and Apache License 2.0
+  Version: v3.0.1
