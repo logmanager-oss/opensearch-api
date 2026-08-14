@@ -1,0 +1,21 @@
+# Update a document with optimistic concurrency control. Shows: capturing
+# _seq_no/_primary_term, waiting for the capture source to exist
+# (success-when + a retry budget on the producing call), and captures as
+# query values.
+calls:
+  - name: get_doc
+    method: GET
+    path: /my-index/_doc/1
+    retry: 5
+    success-when: '._seq_no != null'
+    capture:
+      seq: '._seq_no'
+      term: '._primary_term'
+
+  - name: update_doc
+    method: PUT
+    path: /my-index/_doc/1
+    query:
+      if_seq_no: '${seq}'
+      if_primary_term: '${term}'
+    body: '{"field":"updated"}'

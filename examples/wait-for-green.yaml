@@ -1,0 +1,14 @@
+# Gate an action on cluster health. The first call retries until the
+# cluster reports green — the runbook replacement for a sleep. Only then
+# does the action run.
+calls:
+  - name: wait_for_green
+    method: GET
+    path: /_cluster/health
+    retry: -1
+    success-when: '.status == "green"'
+
+  - name: force_merge
+    method: POST
+    path: /my-index/_forcemerge
+    retry: 3

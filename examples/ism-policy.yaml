@@ -1,0 +1,19 @@
+# Install an ISM policy and apply it to an index. Shows: defaults layering —
+# every call inherits retry/backoff/abort-on, and one call overrides
+# retry with a zero value (a present key always wins, even when zero).
+defaults:
+  retry: 3
+  backoff: exponential
+  abort-on: [400]
+
+calls:
+  - name: put_policy
+    method: PUT
+    path: /_plugins/_ism/policies/delete-after-7d
+    body: '@ism-policy.json'
+
+  - name: apply_policy
+    method: POST
+    path: /_plugins/_ism/add/my-index
+    body: '{"policy_id":"delete-after-7d"}'
+    retry: 0

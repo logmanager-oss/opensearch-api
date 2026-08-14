@@ -1,0 +1,43 @@
+# Create an index, load one document, and update it with optimistic
+# concurrency. Shows: an idempotent delete that accepts a 404, a body from
+# @file, capture, and a tolerated failure (continue-on-failure).
+defaults:
+  retry: 3
+  backoff: exponential
+
+calls:
+  - name: drop_stale_index
+    method: DELETE
+    path: /my-index
+    success-when: '.acknowledged == true or .status == 404'
+
+  - name: create_index
+    method: PUT
+    path: /my-index
+    body: '@index-settings.json'
+    success-when: '.acknowledged'
+
+  - name: index_doc
+    method: PUT
+    path: /my-index/_doc/1
+    body: '{"field":"initial"}'
+
+  - name: get_doc
+    method: GET
+    path: /my-index/_doc/1
+    capture:
+      seq: '._seq_no'
+      term: '._primary_term'
+
+  - name: update_doc
+    method: PUT
+    path: /my-index/_doc/1
+    query:
+      if_seq_no: '${seq}'
+      if_primary_term: '${term}'
+    body: '{"field":"updated"}'
+
+  - name: warm_caches
+    method: POST
+    path: /my-index/_forcemerge
+    continue-on-failure: true

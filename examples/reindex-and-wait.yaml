@@ -1,0 +1,20 @@
+# Start an async reindex, capture its task id, and poll the task until it
+# completes. Shows: capture into a request path, and retry-when as a
+# failure indicator on a 200 response.
+calls:
+  - name: start_reindex
+    method: POST
+    path: /_reindex
+    query:
+      wait_for_completion: 'false'
+    body: '{"source":{"index":"old-index"},"dest":{"index":"new-index"}}'
+    success-when: '.task != null'
+    retry: 3
+    capture:
+      task: '.task'
+
+  - name: wait_for_reindex
+    method: GET
+    path: /_tasks/${task}
+    retry: -1
+    retry-when: '.completed == false'
