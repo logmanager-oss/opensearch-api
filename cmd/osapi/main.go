@@ -27,7 +27,7 @@ func main() {
 func run(ctx context.Context) int {
 	root := cli.NewRootCommand(version)
 	err := root.ExecuteContext(ctx)
-	if err != nil {
+	if err != nil && !cli.IsReported(err) {
 		fmt.Fprintln(os.Stderr, "error:", err)
 	}
 	return exitCode(err)

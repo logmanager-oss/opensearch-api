@@ -4,6 +4,7 @@
 package runbook
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"io"
@@ -25,11 +26,10 @@ import (
 	"github.com/logmanager-oss/opensearch-api/internal/retry"
 )
 
-// Call is one request in a runbook, fully resolved: body read, durations and
-// sizes parsed, predicates compiled. Nothing here requires further parsing
-// before the call can be executed. RetryWhen/SuccessWhen are the compiled form
-// of the expressions Retry also carries as strings; execute the compiled ones
-// rather than recompiling from Retry.
+// Call is one runbook request, fully resolved: body read, sizes and
+// durations parsed, predicates compiled. Nothing here needs further parsing
+// before execution. RetryWhen/SuccessWhen are the compiled form of Retry's
+// string expressions. Execute these, not Retry's strings.
 type Call struct {
 	Name, Method, Path string
 	Body               []byte
@@ -43,21 +43,49 @@ type Call struct {
 	Capture            []Capture // document order; empty when the call captures nothing
 }
 
-// Capture is one name: jq-expression pair from a call's capture: mapping.
-// Expr is the source text, kept for error messages; code is its compiled,
-// unexported form. This package compiles its own rather than reusing
-// retry.Predicate: Predicate.match loops for a truthy value while a capture
-// takes only the first emitted one, and Predicate's fields are unexported
-// anyway.
+// References returns the capture names this call interpolates, across path,
+// query values, header values and body, in sorted order. --dry-run prints
+// them. It uses the same scanner Load validates with, so the two can't
+// disagree.
+func (c *Call) References() []string {
+	names := make(map[string]struct{})
+	collect := func(s string) {
+		// Load already rejected any error scanTemplate could return here
+		// (checkRefs), so it is dropped rather than propagated.
+		_, _ = scanTemplate(s, func(name string) (string, error) {
+			names[name] = struct{}{}
+			return "", nil
+		})
+	}
+
+	collect(c.Path)
+	for _, v := range c.Query {
+		collect(v)
+	}
+	for _, values := range c.Headers {
+		for _, v := range values {
+			collect(v)
+		}
+	}
+	collect(string(c.Body))
+
+	return slices.Sorted(maps.Keys(names))
+}
+
+// Capture is a name: jq-expression pair from a call's capture: mapping,
+// holding both Expr (kept for error messages and --dry-run) and its
+// compiled, unexported code. This package compiles its own rather than
+// reusing retry.Predicate: Predicate loops for a truthy value, but a capture
+// wants only the first value emitted.
 type Capture struct {
 	Name string
 	Expr string
 	code *gojq.Code
 }
 
-// capDecl records where a capture name was declared, for validating later
-// ${name} references: the declaring call's name (for error messages) and
-// whether it tolerates failure, which would leave the capture unset.
+// capDecl records where a capture was declared, for validating ${name}
+// references: the call's name (for errors) and whether it tolerates
+// failure, which leaves the capture unset.
 type capDecl struct {
 	callName          string
 	continueOnFailure bool
@@ -95,7 +123,7 @@ type callSpec struct {
 }
 
 // Load parses a runbook. Relative @file body paths resolve against baseDir,
-// which the caller sets to the runbook file's own directory; an empty baseDir
+// which the caller sets to the runbook file's directory. An empty baseDir
 // leaves them relative to the process working directory.
 func Load(r io.Reader, baseDir string) (*Runbook, error) {
 	var doc struct {
@@ -104,8 +132,8 @@ func Load(r io.Reader, baseDir string) (*Runbook, error) {
 	}
 	dec := yaml.NewDecoder(r)
 	dec.KnownFields(true)
-	// An empty input is io.EOF here; fall through so validateCallsShape gives
-	// "calls: is required" instead of a bare EOF.
+	// An empty input reads as io.EOF here. Fall through so validateCallsShape
+	// reports "calls: is required" instead of a bare EOF.
 	if err := dec.Decode(&doc); err != nil && !errors.Is(err, io.EOF) {
 		return nil, fmt.Errorf("loading runbook: %w", err)
 	}
@@ -121,17 +149,16 @@ func Load(r io.Reader, baseDir string) (*Runbook, error) {
 	if err := validateCallsShape(&doc.Calls); err != nil {
 		return nil, err
 	}
-	// Duplicate names are a purely structural property, so check them before
-	// per-call loading reads body files and compiles jq: otherwise which error
-	// a duplicated call reports depends on the filesystem.
+	// Duplicate names are structural, so check them before per-call loading
+	// reads files or compiles jq: otherwise which error a duplicate reports
+	// depends on the filesystem.
 	if err := rejectDuplicateNames(doc.Calls.Content); err != nil {
 		return nil, err
 	}
 
-	// l.declared accumulates capture names as calls are built, in document
-	// order, so a ${name} reference is checked only against captures declared
-	// by earlier calls — making forward references and cycles impossible
-	// without a graph walk.
+	// l.declared accumulates capture names in document order, so a ${name}
+	// reference is checked only against earlier calls' captures. This rules
+	// out forward references and cycles without a graph walk.
 	l := &loader{
 		baseDir:  baseDir,
 		defaults: &defaultsSpec,
@@ -150,8 +177,8 @@ func Load(r io.Reader, baseDir string) (*Runbook, error) {
 }
 
 // loader carries the state Load threads through every call: baseDir and
-// defaults are fixed for the whole runbook, declared accumulates as calls
-// are built. Bundling them keeps loader.call down to a single parameter.
+// defaults are fixed for the run, declared accumulates as calls build.
+// Bundling these keeps loader.call to one parameter.
 type loader struct {
 	baseDir  string
 	defaults *callSpec
@@ -159,7 +186,7 @@ type loader struct {
 }
 
 // LoadFile opens path and loads it with baseDir = filepath.Dir(path). The CLI
-// uses this so the two can never be paired wrongly; tests use Load directly.
+// uses this so the two can't be paired wrongly. Tests use Load directly.
 func LoadFile(path string) (*Runbook, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -226,13 +253,12 @@ var defaultsAllowedKeys = func() map[string]bool {
 }()
 
 // loadDefaults decodes the optional defaults: block into a callSpec baseline
-// that every call's spec starts from, and validates it exactly as a call's
-// own spec is validated: backoff/durations/size parse, retry-when/success-when
-// compile, and an "@file" body resolves against baseDir. Without this, an
-// invalid default was only ever parsed per-call, which meant an error landed
-// on the first call that happened not to override the bad key (misattributing
-// it) or never surfaced at all if every call happened to override it (letting
-// it escape). A missing defaults: yields the zero callSpec, i.e. no defaults.
+// every call starts from, and validates it exactly like a call's own spec:
+// backoff/durations/size parse, retry-when/success-when compile, and an
+// "@file" body resolves against baseDir. Without this, an invalid default
+// could be misattributed to a call, or escape validation entirely when every
+// call overrode it. A missing defaults: yields the zero callSpec (no
+// defaults).
 func loadDefaults(node *yaml.Node, baseDir string) (callSpec, error) {
 	if node.Kind == 0 {
 		return callSpec{}, nil
@@ -267,8 +293,8 @@ func loadDefaults(node *yaml.Node, baseDir string) (callSpec, error) {
 	if err != nil {
 		return callSpec{}, fmt.Errorf("%s: %w", ref, err)
 	}
-	// nil stdin: same reasoning as loadCall — a runbook has no stdin of its
-	// own, so "@-" in defaults is rejected the same way it would be per-call.
+	// nil stdin: same reasoning as loadCall. A runbook has no stdin of its
+	// own, so "@-" in defaults is rejected the same as per-call.
 	if _, _, err := osclient.ReadBody(bodyArg, nil); err != nil {
 		return callSpec{}, fmt.Errorf("%s: reading body: %w", ref, err)
 	}
@@ -307,8 +333,7 @@ func nodeKindName(k yaml.Kind) string {
 	}
 }
 
-// call builds one Call from item, layering it onto l.defaults. l.declared
-// accumulates capture names across the whole Load call, in document order.
+// call builds one Call from item, layering it onto l.defaults.
 func (l *loader) call(item *yaml.Node) (Call, error) {
 	name := rawStringField(item, "name")
 	ref := callRef(name, item.Line)
@@ -323,18 +348,14 @@ func (l *loader) call(item *yaml.Node) (Call, error) {
 		return Call{}, err
 	}
 
-	// Decoding onto a copy of defaults is what layers them: yaml.v3 leaves
-	// fields absent from the node untouched. Two consequences worth knowing:
-	// a call cannot reset an inherited key to its zero value (retry: 0 reads
-	// the same as omitted), and yaml.v3 decodes a mapping into an existing
-	// non-nil map *in place*, so Query is cloned — sharing it would leak one
-	// call's overrides into the next and into defaults itself. Query therefore
-	// merges with the defaults this way; slices such as abort-on replace them.
-	// Headers merge separately below, by canonical HTTP header name rather
-	// than by raw map key: decode-in-place would keep "content-type" (from
-	// defaults) and "Content-Type" (from the call) as two distinct keys, and
-	// http.Header.Set calls on both would let map-iteration order pick the
-	// winner.
+	// Decoding onto a copy of defaults layers them: yaml.v3 leaves absent
+	// fields untouched, and a present key overrides even with a zero value
+	// (retry: 0 beats an inherited 3). One gotcha: yaml.v3 decodes a mapping
+	// in place, so Query is cloned to avoid leaking overrides into defaults.
+	// Slices like abort-on simply replace instead of merging. Headers merge
+	// separately below, by canonical HTTP name: decode-in-place would keep
+	// "content-type" and "Content-Type" as distinct keys, leaving
+	// http.Header.Set's winner to map-iteration order.
 	spec := *l.defaults
 	spec.Query = maps.Clone(l.defaults.Query)
 	spec.Headers = nil
@@ -375,7 +396,7 @@ func (l *loader) call(item *yaml.Node) (Call, error) {
 
 	// Sorted for the same reason as the query loop above. Headers keep
 	// defaults separate (mergeHeaders), so own and inherited values are
-	// checked in two passes; an own key overriding a default canonically
+	// checked in two passes. An own key overriding a default canonically
 	// skips it, since an overridden default never ships.
 	for _, k := range slices.Sorted(maps.Keys(spec.Headers)) {
 		if err := rejectRefInKey(k, ref, "header"); err != nil {
@@ -401,8 +422,8 @@ func (l *loader) call(item *yaml.Node) (Call, error) {
 	if err != nil {
 		return Call{}, fmt.Errorf("%s: %w", ref, err)
 	}
-	// nil stdin: a runbook has no stdin of its own, which is what makes
-	// osclient.ReadBody reject "@-" with ErrNoStdin.
+	// nil stdin: a runbook has no stdin of its own, so osclient.ReadBody
+	// rejects "@-" with ErrNoStdin.
 	body, hasBody, err := osclient.ReadBody(bodyArg, nil)
 	if err != nil {
 		return Call{}, fmt.Errorf("%s: reading body: %w", ref, err)
@@ -427,8 +448,8 @@ func (l *loader) call(item *yaml.Node) (Call, error) {
 	}
 
 	// Registered only once the call is otherwise valid, and after its own
-	// references were checked against the captures declared so far — a call
-	// can reference an earlier capture but never one of its own.
+	// references were checked against captures declared so far: a call can
+	// reference an earlier capture, never one of its own.
 	for _, c := range captures {
 		if prev, ok := l.declared[c.Name]; ok {
 			if prev.callName == spec.Name {
@@ -440,8 +461,11 @@ func (l *loader) call(item *yaml.Node) (Call, error) {
 	}
 
 	return Call{
-		Name:              spec.Name,
-		Method:            spec.Method,
+		Name: spec.Name,
+		// Defaulted here rather than left to net/http's implicit GET, so a
+		// loaded Call fully describes the request it will send: --dry-run
+		// prints Method verbatim.
+		Method:            cmp.Or(spec.Method, http.MethodGet),
 		Path:              spec.Path,
 		Body:              body,
 		HasBody:           hasBody,
@@ -510,14 +534,12 @@ func buildRetryConfig(spec *callSpec) (config.RetryConfig, error) {
 }
 
 // validateMethod rejects a method token http.NewRequest would reject at
-// execution time. Without this, an invalid method (e.g. "GET EXTRA") loaded
-// cleanly and only failed when osclient.BuildRequest called http.NewRequest
-// mid-run — aborting after earlier calls had already mutated the cluster,
-// which is exactly what load-time validation exists to prevent. The probe
-// request reuses net/http's own token check rather than reimplementing RFC
-// 7230's token grammar, so load-time acceptance guarantees execution-time
-// acceptance; the URL and body are irrelevant to that check. An empty method
-// is left for http.NewRequest to default to GET, same as today.
+// execution time. Without this check, an invalid method like "GET EXTRA"
+// loaded cleanly and failed only mid-run, after earlier calls had already
+// mutated the cluster. Load-time validation exists to prevent exactly that.
+// It reuses net/http's own token check instead of reimplementing RFC 7230's
+// grammar, so load-time acceptance guarantees execution-time acceptance. An
+// empty method defaults to GET, same as today.
 func validateMethod(method string) error {
 	if method == "" {
 		return nil
@@ -529,12 +551,11 @@ func validateMethod(method string) error {
 }
 
 // mergeHeaders layers own onto defaults by canonical HTTP header name
-// (textproto.CanonicalMIMEHeaderKey, applied via http.Header.Set), so
-// "Content-Type" in own always beats "content-type" in defaults — or any
-// other case spelling either side happens to use — rather than leaving the
-// winner to map iteration order. Unlike Query, headers cannot merge as plain
-// map[string]string: two spellings of the same header are distinct map keys
-// but not distinct headers.
+// (textproto.CanonicalMIMEHeaderKey via http.Header.Set), so any
+// case-spelling of a header in own always beats defaults, rather than
+// leaving the winner to map-iteration order. Unlike Query, headers can't
+// merge as plain map[string]string: two spellings of one header are distinct
+// keys but not distinct headers.
 func mergeHeaders(defaults, own map[string]string) http.Header {
 	if len(defaults) == 0 && len(own) == 0 {
 		return nil
@@ -597,7 +618,7 @@ func rawStringField(node *yaml.Node, key string) string {
 }
 
 // checkAllowedKeys rejects a mapping node with any key not in allowed, so a
-// typo (e.g. succes-when) fails to load instead of being silently ignored —
+// typo like succes-when fails to load instead of being silently ignored.
 // node.Decode does not honor Decoder.KnownFields.
 func checkAllowedKeys(node *yaml.Node, allowed map[string]bool, ref string) error {
 	for i := 0; i+1 < len(node.Content); i += 2 {
@@ -610,12 +631,11 @@ func checkAllowedKeys(node *yaml.Node, allowed map[string]bool, ref string) erro
 }
 
 // rawNodeField returns the raw value node for key in a mapping node, or nil
-// if absent, ahead of the allowed-key check and struct decode so error
-// messages can name the call even when its keys are invalid. Used directly
-// for capture: (callSpec has no Capture field, since a map field wouldn't
-// preserve document order), as the shared walk beneath rawStringField, and
-// to tell whether a call sets a key itself versus inheriting it from
-// defaults: (checkRefs' inherited parameter).
+// if absent, ahead of the allowed-key check and struct decode, so error
+// messages can name the call even with invalid keys. Used for capture:
+// (callSpec has no such field, see callSpec), as the shared walk beneath
+// rawStringField, and to tell whether a call sets a key itself versus
+// inheriting it from defaults: (checkRefs' inherited parameter).
 func rawNodeField(node *yaml.Node, key string) *yaml.Node {
 	if node.Kind != yaml.MappingNode {
 		return nil
@@ -628,9 +648,9 @@ func rawNodeField(node *yaml.Node, key string) *yaml.Node {
 	return nil
 }
 
-// mappingHasKey reports whether node — nil when the call omits the key
-// altogether — itself declares key, as opposed to key reaching the merged
-// spec only through defaults: layering.
+// mappingHasKey reports whether node itself declares key, as opposed to key
+// reaching the merged spec only through defaults: layering. node is nil when
+// the call omits the key altogether.
 func mappingHasKey(node *yaml.Node, key string) bool {
 	if node == nil || node.Kind != yaml.MappingNode {
 		return false
@@ -675,10 +695,9 @@ func parseCaptures(node *yaml.Node, ref string) ([]Capture, error) {
 	return captures, nil
 }
 
-// rejectRefInKey rejects a "${" in a query or header key: only a value can
-// be substituted (checkRefs covers values), so a key containing one would
-// ship a literal, unresolved "${...}" to the server with no load-time
-// warning.
+// rejectRefInKey rejects a "${" in a query or header key: only values can be
+// substituted (checkRefs covers those), so a key containing one would ship
+// an unresolved "${...}" to the server with no warning.
 func rejectRefInKey(key, ref, field string) error {
 	if strings.Contains(key, "${") {
 		return fmt.Errorf("%s: %s key %q: references are not supported in query/header keys", ref, field, key)
@@ -686,14 +705,13 @@ func rejectRefInKey(key, ref, field string) error {
 	return nil
 }
 
-// checkRefs validates every ${name} reference in s against declared — the
-// capture names known by the time the referencing call is reached — naming
-// ref in any error. It does not distinguish an unknown name from a forward
-// reference: in a left-to-right walk the two look identical, and rejecting
-// both makes a capture cycle impossible without a graph walk. inherited
+// checkRefs validates every ${name} reference in s against declared, the
+// capture names known so far, naming ref in any error. It can't distinguish
+// an unknown name from a forward reference: a left-to-right walk sees them
+// identically, and rejecting both also rules out capture cycles. inherited
 // marks s as reached via defaults: layering, so the error names that
-// explicitly instead of pointing at a line inside defaults: with no
-// indication of how it got there.
+// explicitly, rather than pointing at a line inside defaults: with no
+// explanation.
 func checkRefs(s string, declared map[string]capDecl, ref string, inherited bool) error {
 	source := ""
 	if inherited {
@@ -719,7 +737,7 @@ func checkRefs(s string, declared map[string]capDecl, ref string, inherited bool
 }
 
 // bodyRef augments ref with the resolved @file path when bodyArg names one,
-// so a reference error inside the file points at that path — the file's own
+// so a reference error inside the file points at that path. The file's own
 // line numbers aren't tracked, but the path alone is usually enough.
 func bodyRef(ref, bodyArg string) string {
 	if len(bodyArg) < 2 || bodyArg[0] != '@' || bodyArg == "@-" {

@@ -24,8 +24,9 @@ Shell completion (below) needs `osapi` on your `PATH`, so prefer `go install`.
 
 ## Usage
 
-`osapi` sends one request per invocation — the command itself is the request
-(there is no `request` subcommand). `osapi --version` prints the version.
+`osapi` sends one request per invocation — the command itself is the request. The `run`
+subcommand is the exception: it executes a declarative, multi-call YAML runbook instead (see
+[Run files](#run-files-osapi-run) below). `osapi --version` prints the version.
 
 ```sh
 # Cluster health, pretty-printed
@@ -46,6 +47,9 @@ osapi --path _cluster/health --retry -1 --success-when '.status == "green"'
 
 # Poll a long-running task: a 200 with "completed": false is a failure indicator, so keep retrying
 osapi --path _tasks/oTUltX4IQMOUUVeiohTt8A:12345 --retry -1 --retry-when '.completed == false'
+
+# Run a declarative, multi-call runbook (see Run files below)
+osapi run deploy.yaml
 ```
 
 ### Flags
@@ -134,6 +138,221 @@ whatever is exported in the shell.
   `retries exhausted: --success-when not satisfied`.
 - The response body is **always** printed to stdout, including for failing responses, so you can
   inspect `4xx`/`5xx` payloads (or a body a predicate rejected).
+
+## Run files (osapi run)
+
+`osapi run <file.yaml>` executes a declarative YAML "runbook": a sequence of OpenSearch calls,
+run in document order, against the same connection settings as every other subcommand.
+
+```yaml
+defaults:
+  retry: 3
+  backoff: exponential
+
+calls:
+  - name: drop_stale_index
+    method: DELETE
+    path: /my-index
+    success-when: '.acknowledged == true or .status == 404'
+
+  - name: create_index
+    method: PUT
+    path: /my-index
+    body: '@index-settings.json'
+    success-when: '.acknowledged'
+
+  - name: index_doc
+    method: PUT
+    path: /my-index/_doc/1
+    body: '{"field":"initial"}'
+
+  - name: get_doc
+    method: GET
+    path: /my-index/_doc/1
+    capture:
+      seq: '._seq_no'
+      term: '._primary_term'
+
+  - name: update_doc
+    method: PUT
+    path: /my-index/_doc/1
+    query:
+      if_seq_no: '${seq}'
+      if_primary_term: '${term}'
+    body: '{"field":"updated"}'
+
+  - name: warm_caches
+    method: POST
+    path: /my-index/_forcemerge
+    continue-on-failure: true
+```
+
+`index-settings.json` sits next to the runbook file; run it with `osapi run deploy.yaml` (add
+`--dry-run` to validate it and print the plan without sending anything).
+
+### Schema
+
+Every call is a mapping of these keys; `defaults:` is an optional top-level mapping applied to
+every call before its own keys are read.
+
+| Key                   | Required | Description                                                          |
+| ---------------------- | -------- | --------------------------------------------------------------------- |
+| `name`                 | yes      | unique call identifier, used in progress lines, errors, and the dry-run plan |
+| `path`                 | yes      | request path, e.g. `_cluster/health` — same as `--path`              |
+| `method`               |          | HTTP method (default `GET`)                                          |
+| `body`                 |          | request body: literal string or `@file` (resolved next to the runbook) |
+| `query`                |          | mapping of query parameters                                          |
+| `headers`              |          | mapping of request headers                                           |
+| `retry`                |          | number of retries (`0` = none, `-1` = unlimited) — same as `--retry` |
+| `backoff`              |          | backoff strategy: `constant`, `linear`, or `exponential`             |
+| `backoff-initial`      |          | initial backoff delay, e.g. `'2s'`                                   |
+| `backoff-max`          |          | maximum backoff delay                                                |
+| `backoff-jitter`       |          | backoff jitter as a fraction in `[0,1)`                              |
+| `abort-on`             |          | status codes that stop retrying (list)                               |
+| `retry-when`           |          | jq expression; truthy forces a retry even on a `2xx`                 |
+| `success-when`         |          | jq expression; success only when truthy, regardless of status        |
+| `capture`              |          | mapping of `name: jq-expression`, extracted from a successful response |
+| `continue-on-failure`  |          | don't halt the run if this call fails; its failure is reported as tolerated |
+| `max-body-buffer`      |          | max body buffered for predicate/capture evaluation (`0` = unlimited) |
+
+`defaults:` accepts every key above except `name`, `path`, and `capture` — those describe one
+specific call, not a policy to share. A call's own key always wins over the inherited one. List
+values such as `abort-on` are **replaced** wholesale by a call's own list, never merged with the
+inherited one; `query` and `headers` maps **merge** key-by-key instead, with the call's own value
+winning per key on a collision. A key that is present on a call always overrides the inherited
+value, even when it is zero: `retry: 0` under a `defaults` of `retry: 3` runs with zero retries.
+Only an omitted key inherits.
+
+### Execution model
+
+Calls run strictly in document order. The first call to fail halts the run: every call after it is
+reported as not run, and `osapi run` exits non-zero. A call with `continue-on-failure: true` does
+not halt the run on failure — its failure is reported as tolerated, and the next call still runs.
+The run's exit code is non-zero exactly when it halted; a run that finishes with only tolerated
+failures still exits `0`. A SIGTERM or Ctrl-C while a call is in flight interrupts the run, prints a
+summary naming the in-flight call and the not-run count, and exits `130` — the same as any other
+`osapi` invocation.
+
+A call's `method:` defaults to `GET`. Durations (`backoff-initial`, `backoff-max`) and sizes
+(`max-body-buffer`) are YAML strings, parsed the same way as their flag equivalents — e.g. `'2s'`,
+`'1MiB'`.
+
+### Capture and `${name}`
+
+A call's `capture:` maps a name to a jq expression evaluated against that call's successful
+response body. Only a scalar result (string, number, or boolean) can be captured — an object, an
+array, or `null` fails the call.
+
+Every `${name}` reference is validated when the runbook loads: it must name a capture declared by
+an earlier call in the document. A forward or self-reference is a load error, and so is a
+reference to a capture declared by a `continue-on-failure: true` call, since a tolerated failure
+could leave it unset. `$${` escapes a literal `${` without triggering substitution. A resolved
+value is inserted **verbatim** — nothing is auto-quoted or auto-escaped, so producing valid
+JSON (or whatever the field expects) is the runbook author's job. `${name}` resolves against
+captures **only**: no environment variables, no CLI variables, nothing else.
+
+The likeliest question this raises: **the captured value isn't there yet.** Rather than a separate
+polling mechanism, put `success-when` on the same call that produces the capture, paired with a
+retry budget (`retry: -1` to wait as long as it takes, or a bounded count), e.g.
+`success-when: '._seq_no != null'` with `retry: -1` — the call retries until the field appears, and
+only then does its capture run.
+
+Two jq idioms answer most escaping and scalar-restriction questions in one shot:
+
+- `'.reason | @json'` renders a string that already carries its own quotes and escapes. Write the
+  placeholder **unquoted** in the body: `body: '{"msg":${reason}}'` is valid JSON whatever
+  `.reason` contains — quotes, newlines, anything.
+- `'._source | tojson'` turns a captured object or array into a single scalar string of raw JSON.
+  Verbatim insertion then splices that JSON in unchanged, so `body: '{"doc":${src}}'` embeds the
+  whole object as-is.
+
+Two limits are worth knowing because they are real and were found in testing:
+
+1. A value substituted into `path` is rejected if it contains `/`, `?`, `#`, or `%` — a captured
+   value could otherwise redirect the call to a different endpoint or inject query parameters.
+   `body`, `query`, and header substitution stay verbatim; only `path` is restricted.
+2. There is no way to write a literal `$` immediately followed by a reference: `$$${x}` renders as
+   `$${x}`, because `$$` (the escape) and the `${` that follows it are consumed together as one
+   `$${` escape sequence before the reference is ever seen.
+
+`${...}` is **not** supported in query or header *keys* — only in values. A key containing one is a
+load error, not a literal shipped to the server.
+
+A `${}` placeholder inside an `@file` body works exactly like a literal one, but if left unquoted
+it makes the file itself invalid JSON on disk (`{"n":${count}}` is not valid JSON by itself). A
+quoted placeholder (`{"n":"${count}"}`) keeps the file valid JSON at rest, at the cost of forcing
+the substituted value to render as a string.
+
+`-v` prints every captured value as `name=value` on stderr. Because these values come from the API
+response at runtime rather than from a flag or environment variable, CI secret-masking — which
+typically redacts known variable names — does **not** cover them; don't capture and log a value you
+wouldn't want sitting in a CI log.
+
+### Accepting a non-2xx status
+
+A call succeeds only when its `success-when` is truthy, regardless of HTTP status — so a `404` can
+be an accepted outcome. This is the idiom for an idempotent delete at the start of a runbook:
+`success-when: '.acknowledged == true or .status == 404'` treats both "the index existed and was
+deleted" and "the index was already gone" as success, so the runbook can be run repeatedly.
+
+### `--dry-run`
+
+`--dry-run` validates the runbook and prints its plan without sending any request. Running it
+against the example above prints:
+
+```
+dry-run: 6 call(s), no requests sent
+  1. drop_stale_index: DELETE /my-index
+     retry: 3 (exponential)
+  2. create_index: PUT /my-index
+     body: 38 bytes
+     retry: 3 (exponential)
+  3. index_doc: PUT /my-index/_doc/1
+     body: 19 bytes
+     retry: 3 (exponential)
+  4. get_doc: GET /my-index/_doc/1
+     retry: 3 (exponential)
+     produces: seq, term
+  5. update_doc: PUT /my-index/_doc/1
+     body: 19 bytes
+     retry: 3 (exponential)
+     consumes: ${seq}, ${term}
+  6. warm_caches: POST /my-index/_forcemerge (continue-on-failure)
+     retry: 3 (exponential)
+```
+
+Headers are deliberately omitted from the plan — printing them would put an `Authorization` value
+into stderr and CI logs.
+
+### Output
+
+stdout is always empty (reserved for a future `--output` flag). Progress — one line per call — a
+failing call's body, and any warnings all go to stderr. A failing call's body is echoed indented by
+two spaces, bounded by that call's own `max-body-buffer`, with control characters stripped so the
+endpoint's response can never overwrite the lines above it.
+
+### Precedence
+
+Connection settings (`--endpoint`, `-u`, `--password`, `--ca-cert`, `--env-file`, `-k`) resolve
+exactly as for every other subcommand — see [Configuration precedence](#configuration-precedence)
+above. Retry semantics (`retry`, `backoff`, `backoff-initial`, ...), however, come from the YAML
+alone: `run` has no `--retry`/`--backoff`/etc. flags, and passing one is an "unknown flag" error.
+
+A call's `@file` body resolves relative to the runbook file's own directory (an absolute path is
+used as given), so a runbook and its payload files can be moved together as a unit regardless of
+the working directory `osapi run` is invoked from.
+
+Connection flags work on either side of the subcommand: `osapi --endpoint ... run deploy.yaml` and
+`osapi run deploy.yaml --endpoint ...` are equivalent. `--dry-run` is a flag of `run` itself, so it
+must come *after* the subcommand.
+
+There is no built-in time bound on a run. `retry: -1` retries a call forever until it succeeds or
+the process receives SIGTERM — there is no `--timeout` equivalent. The summary line still prints on
+that path, so an operator watching stderr sees exactly what completed before the interrupt.
+
+Not yet supported: a per-call `timeout:`, per-call identity (`credentials:`/`as:`), general
+variable substitution/templating beyond captures, a stdin body, and `--output` for saving response
+bodies.
 
 ## Passwords
 
