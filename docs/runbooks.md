@@ -189,7 +189,7 @@ Two jq idioms answer most escaping and scalar-restriction questions:
   string of raw JSON. Verbatim insertion then splices that JSON in unchanged,
   so `body: '{"doc":${src}}'` embeds the whole object as-is.
 
-Two limits are real and were found in testing:
+Substitution has two limits:
 
 1. A value substituted into `path` is rejected if it contains `/`, `?`, `#`,
    or `%`. A captured value could otherwise redirect the call to a different
