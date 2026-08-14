@@ -518,10 +518,10 @@ calls:
 }
 
 // Headers keep defaults separate from the call's own (mergeHeaders), so
-// inherited values get their own reference-check pass: an unresolvable ref in
-// a defaults header fails the load unless the call overrides that header —
-// by canonical name, any case spelling — in which case the default never
-// ships and must not be checked.
+// inherited values get their own reference-check pass. An unresolvable ref
+// in a defaults header fails the load, unless the call overrides that
+// header by canonical name (any case spelling) — then the default never
+// ships and isn't checked.
 func TestLoadInheritedHeaderRefs(t *testing.T) {
 	src := `
 defaults:

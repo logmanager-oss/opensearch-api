@@ -965,12 +965,10 @@ calls:
 	assert.Equal(t, `{"seq":42}`, string(got.body))
 }
 
-// string, int and bool captures render correctly, and a float
-// renders without a trailing ".0".
-// This proves the wiring — a captured value reaching the wire in a later
-// call's body — not rendering itself: renderScalar's branches are already
-// covered exhaustively by TestRenderScalar, so one string and one integer
-// row are enough to show substitution carries a rendered value end to end.
+// string and int captures render correctly. This proves the wiring — a
+// captured value reaching a later call's body — not rendering itself:
+// renderScalar's branches are already covered by TestRenderScalar, so one
+// row of each is enough.
 func TestRunCaptureValueTypesRender(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -1028,9 +1026,9 @@ func TestRunCaptureFailureClasses(t *testing.T) {
 			wantContains:  []string{"max-body-buffer"},
 		},
 		{
-			// .missing would yield null (a jq object index on an absent key is
-			// null, not "no output"), which is "not a scalar", not this class: a
-			// select() filter with no matches is what actually emits nothing.
+			// .missing yields null (an absent key indexes to null, not "no
+			// output") — "not a scalar", not this class. Only a select() with no
+			// matches emits nothing.
 			name: "expression matches nothing", body: `{"v":[1,2,3]}`, expr: ".v[] | select(. == 99)",
 			wantContains: []string{"matched nothing"},
 		},
@@ -1142,9 +1140,9 @@ calls:
 	assert.Contains(t, out, "note=ok\n")
 }
 
-// the two documented jq escape hatches — tojson to splice a
-// whole object into a later body, and @json to safely interpolate a string
-// that may contain quotes or newlines — work end to end.
+// the two documented jq escape hatches work end to end: tojson splices a
+// whole object into a later body, and @json safely interpolates a string
+// containing quotes or newlines.
 func TestRunCaptureJQEscapeHatches(t *testing.T) {
 	t.Run("tojson splices an object unquoted", func(t *testing.T) {
 		var rec recorder
@@ -1202,8 +1200,8 @@ calls:
 }
 
 // Substitution must happen on copies, never on Call's own strings: a reused
-// Runner running the same *Runbook twice must resubstitute fresh values each
-// time, not carry over the first run's resolved path from a mutated Call.
+// Runner running the same *Runbook twice must resubstitute fresh values, not
+// carry over a mutated Call's resolved path.
 func TestRunReusableAcrossMultipleRunsWithDifferentCaptures(t *testing.T) {
 	var rec recorder
 	srv := newMuxServer(t, &rec, map[string]*pathScript{
@@ -1370,10 +1368,9 @@ calls:
 	assert.Contains(t, out, `call "next": failed (request not sent)`)
 }
 
-// Neither the runbook author's literal "." nor a captured "."
-// is ".." on its own, but concatenated across the template boundary they
-// compose into a ".." segment — a value-only check can be walked around this
-// way, so the check must run on the resolved path.
+// Neither the author's literal "." nor a captured "." is ".." alone, but
+// concatenated across the template boundary they compose into one — so the
+// check must run on the resolved path, not per-value.
 func TestRunCaptureSubstitutionRejectsComposedDotDotSegment(t *testing.T) {
 	var rec recorder
 	srv := newMuxServer(t, &rec, map[string]*pathScript{

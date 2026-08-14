@@ -10,12 +10,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// The full renderScalar number matrix: int/float64 (unchanged by the
-// UseNumber fix) and json.Number/*big.Int (the two new cases). null, an
-// array and an object must all still be rejected — accepting null as "null"
-// is a real mutation that survived the load/run-level suite because no
-// runbook capture expression happens to emit a bare null through renderScalar
-// without also failing some earlier check.
+// renderScalar's full number matrix: int/float64 (already correct) plus
+// json.Number/*big.Int (new). null/array/object must stay rejected — a bare
+// null slipping through would be a regression the load/run-level suite
+// wouldn't catch, since no runbook capture emits one without also failing an
+// earlier check.
 func TestRenderScalar(t *testing.T) {
 	bigBeyondInt64, ok := new(big.Int).SetString("123456789012345678901234567890", 10)
 	require.True(t, ok)
@@ -64,10 +63,10 @@ func TestRenderScalar(t *testing.T) {
 	}
 }
 
-// length is gojq's own int, produced without ever touching decodeCaptureBody's
-// json.Number leaves — unlike {"v":42} whose 42 only reaches renderScalar via
-// the json.Number branch. Both must render the same way, but only this one
-// exercises the literal `case int` branch with a value gojq computed itself.
+// length yields gojq's native int without touching decodeCaptureBody's
+// json.Number path — unlike {"v":42}, whose 42 only reaches renderScalar via
+// json.Number. Both must render identically, but only this test exercises
+// the literal `case int` branch with a gojq-computed value.
 func TestCaptureRunGenuineIntFromJQArithmetic(t *testing.T) {
 	c, err := compileCapture("n", ".hits | length")
 	require.NoError(t, err)
@@ -171,8 +170,8 @@ func TestExtractCaptures(t *testing.T) {
 		assert.ErrorContains(t, err, "empty")
 	})
 
-	// No captures means nothing to attribute a body-level failure to; indexing
-	// captures[0] here would panic even though the call has nothing to fail.
+	// No captures means nothing to attribute a body-level failure to;
+	// indexing captures[0] would panic.
 	t.Run("no captures on the call never indexes captures[0], even with an invalid body", func(t *testing.T) {
 		store := map[string]string{}
 
@@ -212,10 +211,10 @@ func TestScanTemplate(t *testing.T) {
 	}
 }
 
-// substitutePath must reject both a substituted value that injects a
-// different endpoint via "/ ? # %" and one that resolves to a "." or ".."
-// path segment, while leaving an author's own literal path untouched even
-// when it contains "..", since no substitution ran to make it untrusted.
+// substitutePath rejects a substituted value containing "/ ? # %" and one
+// that resolves to a "." or ".." segment. An author's own literal path is
+// left untouched, even containing "..", since no substitution ran to make
+// it untrusted.
 func TestSubstitutePath(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -289,10 +288,10 @@ func TestSubstitutePath(t *testing.T) {
 	}
 }
 
-// An unterminated ${ must stop the scan with an error instead of being
-// passed through as a literal — and, since resolve never runs for it, the
-// same malformed reference can never reach the server as an unresolved
-// "${" even if a caller ignored scanTemplate's error.
+// An unterminated ${ stops the scan with an error rather than passing
+// through as a literal. Since resolve never runs for it, the malformed
+// reference can't reach the server unresolved even if a caller ignored the
+// error.
 func TestScanTemplateUnterminatedReferenceIsAnError(t *testing.T) {
 	var called bool
 	_, err := scanTemplate(`{"a":"x", "b":${seq`, func(string) (string, error) {

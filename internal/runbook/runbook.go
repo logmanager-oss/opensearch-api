@@ -44,12 +44,11 @@ type Call struct {
 }
 
 // Capture is one name: jq-expression pair from a call's capture: mapping.
-// Expr is the source text, kept for error messages; code is its compiled
-// form and stays unexported so only this package evaluates it.
-// internal/runbook compiles its own rather than reusing retry.Predicate:
-// Predicate.match loops for a truthy value while a capture takes the first
-// emitted value, and Predicate's expr/code fields are unexported, so neither
-// the iteration contract nor the type fits.
+// Expr is the source text, kept for error messages; code is its compiled,
+// unexported form. This package compiles its own rather than reusing
+// retry.Predicate: Predicate.match loops for a truthy value while a capture
+// takes only the first emitted one, and Predicate's fields are unexported
+// anyway.
 type Capture struct {
 	Name string
 	Expr string
@@ -130,9 +129,9 @@ func Load(r io.Reader, baseDir string) (*Runbook, error) {
 	}
 
 	// l.declared accumulates capture names as calls are built, in document
-	// order, so a ${name} reference is checked against exactly the captures
-	// declared by earlier calls — the walk that makes forward references and
-	// cycles structurally impossible without a graph.
+	// order, so a ${name} reference is checked only against captures declared
+	// by earlier calls — making forward references and cycles impossible
+	// without a graph walk.
 	l := &loader{
 		baseDir:  baseDir,
 		defaults: &defaultsSpec,
@@ -151,9 +150,8 @@ func Load(r io.Reader, baseDir string) (*Runbook, error) {
 }
 
 // loader carries the state Load threads through every call: baseDir and
-// defaults are fixed for the whole runbook, and declared accumulates as
-// calls are built. Bundling them here is what keeps loader.call itself down
-// to a single parameter.
+// defaults are fixed for the whole runbook, declared accumulates as calls
+// are built. Bundling them keeps loader.call down to a single parameter.
 type loader struct {
 	baseDir  string
 	defaults *callSpec
@@ -375,10 +373,10 @@ func (l *loader) call(item *yaml.Node) (Call, error) {
 		}
 	}
 
-	// Sorted for the same reason as the query loop above. Unlike Query,
-	// headers keep defaults separate (mergeHeaders), so own and inherited
-	// values are checked in two passes; an inherited value is skipped when an
-	// own key overrides it canonically — an overridden default never ships.
+	// Sorted for the same reason as the query loop above. Headers keep
+	// defaults separate (mergeHeaders), so own and inherited values are
+	// checked in two passes; an own key overriding a default canonically
+	// skips it, since an overridden default never ships.
 	for _, k := range slices.Sorted(maps.Keys(spec.Headers)) {
 		if err := rejectRefInKey(k, ref, "header"); err != nil {
 			return Call{}, err
@@ -612,12 +610,12 @@ func checkAllowedKeys(node *yaml.Node, allowed map[string]bool, ref string) erro
 }
 
 // rawNodeField returns the raw value node for key in a mapping node, or nil
-// if the key is absent, ahead of the allowed-key check and struct decode so
-// error messages can name the call even when its keys are invalid. Used
-// directly for capture: (callSpec has no Capture field: a map field would
-// not preserve document order) and as the shared walk beneath
-// rawStringField, and to tell whether a call sets a given key itself versus
-// inheriting it from defaults: (checkRefs' inherited parameter).
+// if absent, ahead of the allowed-key check and struct decode so error
+// messages can name the call even when its keys are invalid. Used directly
+// for capture: (callSpec has no Capture field, since a map field wouldn't
+// preserve document order), as the shared walk beneath rawStringField, and
+// to tell whether a call sets a key itself versus inheriting it from
+// defaults: (checkRefs' inherited parameter).
 func rawNodeField(node *yaml.Node, key string) *yaml.Node {
 	if node.Kind != yaml.MappingNode {
 		return nil
@@ -630,10 +628,9 @@ func rawNodeField(node *yaml.Node, key string) *yaml.Node {
 	return nil
 }
 
-// mappingHasKey reports whether node — a mapping node, or nil when the key
-// it would belong to is absent from the call altogether — itself declares
-// key, as opposed to key having reached the merged spec only through
-// defaults: layering.
+// mappingHasKey reports whether node — nil when the call omits the key
+// altogether — itself declares key, as opposed to key reaching the merged
+// spec only through defaults: layering.
 func mappingHasKey(node *yaml.Node, key string) bool {
 	if node == nil || node.Kind != yaml.MappingNode {
 		return false
@@ -692,12 +689,11 @@ func rejectRefInKey(key, ref, field string) error {
 // checkRefs validates every ${name} reference in s against declared — the
 // capture names known by the time the referencing call is reached — naming
 // ref in any error. It does not distinguish an unknown name from a forward
-// reference: from a left-to-right walk of the runbook the two look
-// identical, and rejecting both is what makes a capture cycle structurally
-// impossible without a graph walk. inherited marks s as reached via
-// defaults: layering rather than set on the call itself, which the error
-// text then says explicitly instead of pointing at a line inside defaults:
-// with no indication of how it got there.
+// reference: in a left-to-right walk the two look identical, and rejecting
+// both makes a capture cycle impossible without a graph walk. inherited
+// marks s as reached via defaults: layering, so the error names that
+// explicitly instead of pointing at a line inside defaults: with no
+// indication of how it got there.
 func checkRefs(s string, declared map[string]capDecl, ref string, inherited bool) error {
 	source := ""
 	if inherited {
@@ -723,9 +719,8 @@ func checkRefs(s string, declared map[string]capDecl, ref string, inherited bool
 }
 
 // bodyRef augments ref with the resolved @file path when bodyArg names one,
-// so a reference error inside the file names where in the file tree to look
-// rather than just the call — the file's own line numbers are not tracked,
-// but the resolved path alone is normally enough to find it.
+// so a reference error inside the file points at that path — the file's own
+// line numbers aren't tracked, but the path alone is usually enough.
 func bodyRef(ref, bodyArg string) string {
 	if len(bodyArg) < 2 || bodyArg[0] != '@' || bodyArg == "@-" {
 		return ref

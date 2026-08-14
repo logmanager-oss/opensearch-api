@@ -31,9 +31,8 @@ type Runner struct {
 // Stderr. The returned error has already been reported there; callers must
 // not print it again.
 func (r *Runner) Run(ctx context.Context, rb *Runbook) error {
-	// store is local to Run, not a Runner field, so a Runner stays reusable
-	// across repeated Run calls without one run's captures leaking into the
-	// next.
+	// store is local to Run, not a Runner field, so repeated Run calls don't
+	// leak captures between runs.
 	store := make(map[string]string)
 	var succeeded, tolerated int
 	for idx := range rb.Calls {
@@ -62,9 +61,8 @@ func (r *Runner) Run(ctx context.Context, rb *Runbook) error {
 	return nil
 }
 
-// attemptResult is what one finished retry loop produced: the response and
-// error the engine returned, plus the attempt count and last raw transport
-// error, neither of which retry.Do reports.
+// attemptResult bundles a retry loop's response and error with the attempt
+// count and raw transport error retry.Do doesn't return.
 type attemptResult struct {
 	attempts     int
 	resp         *http.Response
@@ -72,9 +70,8 @@ type attemptResult struct {
 	transportErr error
 }
 
-// runCall executes call under its retry policy. store carries values captured
-// by earlier calls in this Run; substituteCall resolves them into a
-// request-ready spec.
+// runCall executes call under its retry policy, substituting store's
+// captured values from earlier calls into a request-ready spec.
 func (r *Runner) runCall(ctx context.Context, call *Call, store map[string]string) error {
 	spec, err := substituteCall(call, store)
 	if err != nil {
@@ -86,7 +83,6 @@ func (r *Runner) runCall(ctx context.Context, call *Call, store map[string]strin
 
 	req, err := osclient.BuildRequest(r.Endpoint, spec)
 	if err != nil {
-		// Named here: nothing was sent, so there is no status, attempts or body.
 		_, _ = fmt.Fprintf(r.Stderr, "call %q: failed (request not sent)%s: %v\n",
 			call.Name, toleratedSuffix(call), err)
 		return fmt.Errorf("call %q: building request: %w", call.Name, err)
@@ -125,12 +121,11 @@ func (r *Runner) runCall(ctx context.Context, call *Call, store map[string]strin
 	return r.reportOutcome(ctx, call, attemptResult{attempts: attempts, resp: resp, doErr: doErr, transportErr: transportErr}, store)
 }
 
-// substituteCall resolves ${name} references in call's path, query, headers
-// and body against store, returning a fresh osclient.RequestSpec built from
-// copies — never call's own strings, so a reused Runner (or a second Run)
-// still sees the call's raw templated strings untouched. Only path
-// substitution can fail: a captured value that would repoint the request at a
-// different endpoint or inject query parameters.
+// substituteCall builds a fresh RequestSpec by substituting ${name} refs
+// from store into copies of call's path, query, headers and body, so a
+// reused Runner never mutates call. Only path substitution can fail: a
+// captured value there could redirect the request or inject query
+// parameters.
 func substituteCall(call *Call, store map[string]string) (osclient.RequestSpec, error) {
 	path, err := substitutePath(call.Path, store)
 	if err != nil {
@@ -161,9 +156,8 @@ func substituteCall(call *Call, store map[string]string) (osclient.RequestSpec, 
 		if bytes.Contains(call.Body, []byte("${")) {
 			spec.Body = []byte(substitute(string(call.Body), store))
 		} else {
-			// BuildRequest only ever reads spec.Body, never mutates it, so an
-			// untemplated body can share call.Body's backing array instead of
-			// being copied twice per call.
+			// BuildRequest only reads spec.Body, so an untemplated body can
+			// share call.Body's backing array without copying.
 			spec.Body = call.Body
 		}
 	}
@@ -188,11 +182,10 @@ func (r *Runner) reportOutcome(ctx context.Context, call *Call, ar attemptResult
 	return fmt.Errorf("call %q: %w", call.Name, ar.doErr)
 }
 
-// reportSuccess writes the "ok" line for a successful attempt, or — for a
-// capturing call whose capture cannot be extracted — a failure line echoing
-// the response body: the body is the diagnosis for "matched nothing" and
-// "not a scalar". Capture runs before the ok line is written, so a call
-// whose capture fails never prints ok followed by an error.
+// reportSuccess writes the ok line, or — if a capture can't be extracted —
+// a failure line echoing the body, the diagnosis for "matched nothing" and
+// "not a scalar". Capture runs first, so ok is never printed before a
+// capture failure.
 func (r *Runner) reportSuccess(ctx context.Context, call *Call, ar attemptResult, store map[string]string) error {
 	var body []byte
 	var captureErr error
@@ -213,14 +206,12 @@ func (r *Runner) reportSuccess(ctx context.Context, call *Call, ar attemptResult
 	return nil
 }
 
-// captureFromResponse reads resp's body bounded by call's max-body-buffer —
-// the same helper used for the failing-body echo, so max-body-buffer: 0/
-// MaxInt64 mean unlimited here too — extracts every capture in document
-// order into store, and, with Verbose, logs each as name=value. When the call
-// also carries a predicate, the engine has already buffered the body once
-// (retry.go bufferBody); this read is a second, bounded copy of it. The
+// captureFromResponse reads resp's body via readBounded, extracts every
+// capture in document order into store, and logs each as name=value when
+// Verbose. If the call also has a predicate, the body was already buffered
+// once by retry.go's bufferBody — this is a second, bounded copy of it. The
 // bytes are returned alongside any error so reportSuccess can echo them on a
-// capture failure without a second read of the now-closed body.
+// capture failure without re-reading the now-closed body.
 func (r *Runner) captureFromResponse(ctx context.Context, call *Call, resp *http.Response, store map[string]string) ([]byte, error) {
 	data, truncated, err := readBounded(resp.Body, call.Retry.MaxBodyBuffer)
 	_ = resp.Body.Close()
