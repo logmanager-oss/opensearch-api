@@ -3,6 +3,7 @@ package runbook
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -27,31 +28,31 @@ type recordedCall struct {
 	body   []byte
 }
 
-// capture records requests in arrival order, guarded for concurrent handlers.
-type capture struct {
+// recorder records requests in arrival order, guarded for concurrent handlers.
+type recorder struct {
 	mu   sync.Mutex
 	reqs []recordedCall
 }
 
-func (c *capture) add(r recordedCall) {
+func (c *recorder) add(r recordedCall) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.reqs = append(c.reqs, r)
 }
 
-func (c *capture) len() int {
+func (c *recorder) len() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return len(c.reqs)
 }
 
-func (c *capture) at(i int) recordedCall {
+func (c *recorder) at(i int) recordedCall {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.reqs[i]
 }
 
-func (c *capture) paths() []string {
+func (c *recorder) paths() []string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	out := make([]string, len(c.reqs))
@@ -71,7 +72,7 @@ type pathScript struct {
 // newMuxServer serves scripts keyed by path, recording every request into
 // rec. Runbook calls hit different paths (unlike the single-endpoint cli
 // tests), so routing is a mux rather than one handler.
-func newMuxServer(t *testing.T, rec *capture, scripts map[string]*pathScript) *httptest.Server {
+func newMuxServer(t *testing.T, rec *recorder, scripts map[string]*pathScript) *httptest.Server {
 	t.Helper()
 	mux := http.NewServeMux()
 	var mu sync.Mutex
@@ -114,7 +115,7 @@ func clampIdx(idx, length int) int {
 }
 
 func TestRunAllSucceed(t *testing.T) {
-	var rec capture
+	var rec recorder
 	srv := newMuxServer(t, &rec, map[string]*pathScript{
 		"/first":  {statuses: []int{http.StatusOK}},
 		"/second": {statuses: []int{http.StatusOK}},
@@ -141,15 +142,15 @@ calls:
 	err = runner.Run(context.Background(), rb)
 	require.NoError(t, err)
 
-	// Behavior 1: calls execute in document order.
+	// calls execute in document order.
 	assert.Equal(t, []string{"/first", "/second", "/third"}, rec.paths())
 
-	// Behavior 2: all-success summary.
+	// all-success summary.
 	assert.Contains(t, stderr.String(), `run: 3 succeeded`)
 }
 
 func TestRunHaltsOnFailure(t *testing.T) {
-	var rec capture
+	var rec recorder
 	srv := newMuxServer(t, &rec, map[string]*pathScript{
 		"/first":  {statuses: []int{http.StatusOK}},
 		"/second": {statuses: []int{http.StatusBadRequest}, bodies: []string{`{"error":"bad"}`}},
@@ -176,7 +177,7 @@ calls:
 	runner := &Runner{Client: http.DefaultClient, Endpoint: srv.URL, Stderr: &stderr}
 	err = runner.Run(context.Background(), rb)
 
-	// Behavior 3: a failing call halts the run; later calls receive no requests.
+	// a failing call halts the run; later calls receive no requests.
 	require.Error(t, err)
 	assert.ErrorIs(t, err, retry.ErrTerminalStatus, "Run returns the halting call's error")
 	assert.ErrorContains(t, err, `call "second"`, "wrapped with the call name")
@@ -185,7 +186,7 @@ calls:
 }
 
 func TestRunContinueOnFailure(t *testing.T) {
-	var rec capture
+	var rec recorder
 	srv := newMuxServer(t, &rec, map[string]*pathScript{
 		"/first":  {statuses: []int{http.StatusOK}},
 		"/second": {statuses: []int{http.StatusBadRequest}, bodies: []string{`{"error":"bad"}`}},
@@ -210,7 +211,7 @@ calls:
 	runner := &Runner{Client: http.DefaultClient, Endpoint: srv.URL, Stderr: &stderr}
 	err = runner.Run(context.Background(), rb)
 
-	// Behavior 4: continue-on-failure lets the run continue and return nil.
+	// continue-on-failure lets the run continue and return nil.
 	require.NoError(t, err)
 	assert.Equal(t, []string{"/first", "/second", "/third"}, rec.paths())
 	out := stderr.String()
@@ -220,7 +221,7 @@ calls:
 }
 
 func TestRunFailingBodyEchoed(t *testing.T) {
-	var rec capture
+	var rec recorder
 	srv := newMuxServer(t, &rec, map[string]*pathScript{
 		"/ok":        {statuses: []int{http.StatusOK}, bodies: []string{`{"ack":true}`}},
 		"/fail":      {statuses: []int{http.StatusBadRequest}, bodies: []string{`{"error":"boom"}`}},
@@ -247,7 +248,7 @@ calls:
 	_ = runner.Run(context.Background(), rb)
 
 	out := stderr.String()
-	// Behavior 5: failing bodies (halting and tolerated) are echoed, indented;
+	// failing bodies (halting and tolerated) are echoed, indented;
 	// a successful call's body is not.
 	assert.Contains(t, out, `  {"error":"boom"}`)
 	assert.Contains(t, out, `  {"error":"tolerated-boom"}`)
@@ -256,7 +257,7 @@ calls:
 
 func TestRunFailingBodyTruncation(t *testing.T) {
 	bigBody := strings.Repeat("a", 2048) // > 1KiB
-	var rec capture
+	var rec recorder
 	srv := newMuxServer(t, &rec, map[string]*pathScript{
 		"/capped":    {statuses: []int{http.StatusBadRequest}, bodies: []string{bigBody}},
 		"/unlimited": {statuses: []int{http.StatusBadRequest}, bodies: []string{bigBody}},
@@ -283,7 +284,7 @@ calls:
 	require.NoError(t, runner.Run(context.Background(), rb))
 
 	out := stderr.String()
-	// Behavior 6: over-cap body is truncated to exactly 1KiB with a trailing
+	// over-cap body is truncated to exactly 1KiB with a trailing
 	// marker; the same call with max-body-buffer: 0 (the LimitReader(_, 0)
 	// trap) prints the full 2KiB body untruncated.
 	assert.Contains(t, out, strings.Repeat("a", 1024)+"\n  … (truncated at 1KiB)",
@@ -293,7 +294,7 @@ calls:
 }
 
 func TestRunSuccessWhenExhaustsWithReason(t *testing.T) {
-	var rec capture
+	var rec recorder
 	srv := newMuxServer(t, &rec, map[string]*pathScript{
 		"/wait_green": {statuses: []int{http.StatusOK}, bodies: []string{`{"status":"yellow"}`}},
 	})
@@ -324,7 +325,7 @@ calls:
 }
 
 func TestRunSuccessWhenAcceptsNonSuccessStatusWithoutRetry(t *testing.T) {
-	var rec capture
+	var rec recorder
 	srv := newMuxServer(t, &rec, map[string]*pathScript{
 		"/maybe_missing": {statuses: []int{http.StatusNotFound}, bodies: []string{`{"status":404}`}},
 	})
@@ -345,14 +346,14 @@ calls:
 	runner := &Runner{Client: http.DefaultClient, Endpoint: srv.URL, Stderr: &stderr}
 	err = runner.Run(context.Background(), rb)
 
-	// Behavior 9: success-when accepting a non-2xx succeeds without retrying.
+	// success-when accepting a non-2xx succeeds without retrying.
 	require.NoError(t, err)
 	assert.Equal(t, 1, rec.len())
 	assert.Contains(t, stderr.String(), `call "maybe_missing": ok (status 404, 1 attempt)`)
 }
 
 func TestRunContextCanceledMidRun(t *testing.T) {
-	var rec capture
+	var rec recorder
 	gotRequest := make(chan struct{})
 	var once sync.Once
 
@@ -398,7 +399,7 @@ calls:
 	runner := &Runner{Client: http.DefaultClient, Endpoint: srv.URL, Stderr: &stderr}
 	err = runner.Run(ctx, rb)
 
-	// Behavior 10: a canceled context returns promptly with an error matching
+	// a canceled context returns promptly with an error matching
 	// context.Canceled, the summary names the interrupted call and the
 	// not-run count, and no further calls were attempted.
 	require.Error(t, err)
@@ -408,7 +409,7 @@ calls:
 }
 
 func TestRunRequestDetailsReachServer(t *testing.T) {
-	var rec capture
+	var rec recorder
 	srv := newMuxServer(t, &rec, map[string]*pathScript{
 		"/my-index/_doc/1": {statuses: []int{http.StatusOK}},
 	})
@@ -431,7 +432,7 @@ calls:
 	runner := &Runner{Client: http.DefaultClient, Endpoint: srv.URL, Stderr: &stderr}
 	require.NoError(t, runner.Run(context.Background(), rb))
 
-	// Behavior 11: body, headers and query params from the YAML reach the server.
+	// body, headers and query params from the YAML reach the server.
 	require.Equal(t, 1, rec.len())
 	got := rec.at(0)
 	assert.Equal(t, "PUT", got.method)
@@ -453,7 +454,7 @@ calls:
 	require.NoError(t, err)
 
 	newFlakyServer := func(t *testing.T) *httptest.Server {
-		var rec capture
+		var rec recorder
 		return newMuxServer(t, &rec, map[string]*pathScript{
 			"/flaky": {statuses: []int{http.StatusServiceUnavailable, http.StatusServiceUnavailable, http.StatusOK}},
 		})
@@ -465,11 +466,11 @@ calls:
 		runner := &Runner{Client: http.DefaultClient, Endpoint: srv.URL, Stderr: &stderr}
 		require.NoError(t, runner.Run(context.Background(), rb))
 
-		// Behavior 12 (attempt count): a call succeeding on its 3rd attempt
+		// a call succeeding on its 3rd attempt
 		// reports "3 attempts".
 		out := stderr.String()
 		assert.Contains(t, out, `call "flaky": ok (status 200, 3 attempts)`)
-		// Behavior 12 (verbose gating): no per-attempt retry lines when quiet.
+		// no per-attempt retry lines when quiet.
 		assert.NotContains(t, out, "retrying in")
 	})
 
@@ -479,7 +480,7 @@ calls:
 		runner := &Runner{Client: http.DefaultClient, Endpoint: srv.URL, Stderr: &stderr, Verbose: true}
 		require.NoError(t, runner.Run(context.Background(), rb))
 
-		// Behavior 12 (verbose gating): per-attempt retry lines appear, prefixed
+		// per-attempt retry lines appear, prefixed
 		// with the call name, only when Verbose.
 		out := stderr.String()
 		assert.Contains(t, out, `call "flaky": attempt 1: status 503; retrying in`)
@@ -492,7 +493,7 @@ calls:
 // covers the plain-status branch; this covers the other two.
 func TestRunVerboseHookReasonAndTransportError(t *testing.T) {
 	t.Run("retry-when reason", func(t *testing.T) {
-		var rec capture
+		var rec recorder
 		srv := newMuxServer(t, &rec, map[string]*pathScript{
 			"/status": {
 				statuses: []int{http.StatusOK, http.StatusOK},
@@ -521,7 +522,7 @@ calls:
 	})
 
 	t.Run("transport error", func(t *testing.T) {
-		srv := newMuxServer(t, &capture{}, map[string]*pathScript{"/x": {statuses: []int{http.StatusOK}}})
+		srv := newMuxServer(t, &recorder{}, map[string]*pathScript{"/x": {statuses: []int{http.StatusOK}}})
 		endpoint := srv.URL
 		srv.Close()
 
@@ -565,7 +566,7 @@ func runRunbook(t *testing.T, srv *httptest.Server, src string) (string, error) 
 // A retried call must resend its body: req.GetBody is replayed per attempt,
 // and without it the second and third attempts would post nothing.
 func TestRunRetryReplaysRequestBody(t *testing.T) {
-	var rec capture
+	var rec recorder
 	srv := newMuxServer(t, &rec, map[string]*pathScript{
 		"/doc": {statuses: []int{http.StatusServiceUnavailable, http.StatusServiceUnavailable, http.StatusOK}},
 	})
@@ -592,7 +593,7 @@ calls:
 // would overflow negative and read nothing.
 func TestRunFailingBodyMaxInt64IsUnlimited(t *testing.T) {
 	big := strings.Repeat("x", 4096)
-	var rec capture
+	var rec recorder
 	srv := newMuxServer(t, &rec, map[string]*pathScript{
 		"/big": {statuses: []int{http.StatusBadRequest}, bodies: []string{big}},
 	})
@@ -611,7 +612,7 @@ calls:
 
 // retry-when forces a retry on a 2xx the engine would otherwise accept.
 func TestRunRetryWhenForcesRetry(t *testing.T) {
-	var rec capture
+	var rec recorder
 	srv := newMuxServer(t, &rec, map[string]*pathScript{
 		"/status": {
 			statuses: []int{http.StatusOK, http.StatusOK},
@@ -634,7 +635,7 @@ calls:
 
 // A transport error has no status and no body to echo.
 func TestRunTransportError(t *testing.T) {
-	srv := newMuxServer(t, &capture{}, map[string]*pathScript{"/x": {statuses: []int{http.StatusOK}}})
+	srv := newMuxServer(t, &recorder{}, map[string]*pathScript{"/x": {statuses: []int{http.StatusOK}}})
 	endpoint := srv.URL
 	srv.Close()
 
@@ -662,7 +663,7 @@ calls:
 // attempt count or body — but it must still be named, especially when
 // tolerated, or the summary counts a failure the operator cannot identify.
 func TestRunBuildRequestFailureIsReported(t *testing.T) {
-	srv := newMuxServer(t, &capture{}, map[string]*pathScript{"/fine": {statuses: []int{http.StatusOK}}})
+	srv := newMuxServer(t, &recorder{}, map[string]*pathScript{"/fine": {statuses: []int{http.StatusOK}}})
 
 	// An invalid URL escape in the path loads fine (load-time validation
 	// cannot judge a path without the endpoint) but fails url.Parse in
@@ -689,7 +690,7 @@ calls:
 
 // A halt after tolerated failures must account for every call.
 func TestRunHaltSummaryCountsToleratedFailures(t *testing.T) {
-	var rec capture
+	var rec recorder
 	srv := newMuxServer(t, &rec, map[string]*pathScript{
 		"/ok":    {statuses: []int{http.StatusOK}},
 		"/tol":   {statuses: []int{http.StatusBadRequest}, bodies: []string{`{"e":1}`}},
@@ -804,7 +805,7 @@ calls:
 // The echoed body is untrusted: a bare CR or an ANSI escape would let the
 // endpoint overwrite the progress lines above it, including its own failure.
 func TestRunFailingBodyStripsControlCharacters(t *testing.T) {
-	var rec capture
+	var rec recorder
 	srv := newMuxServer(t, &rec, map[string]*pathScript{
 		"/evil": {
 			statuses: []int{http.StatusBadRequest},
@@ -879,7 +880,7 @@ calls:
 // After a SIGTERM the summary is the only record of the run, so it must
 // account for tolerated failures too, not just successes and not-run calls.
 func TestRunCanceledSummaryCountsToleratedFailures(t *testing.T) {
-	var rec capture
+	var rec recorder
 	gotRequest := make(chan struct{})
 	var once sync.Once
 
@@ -929,4 +930,538 @@ calls:
 	assert.Equal(t, []string{"/tol", "/hang"}, rec.paths())
 	assert.Contains(t, stderr.String(),
 		`run: 0 succeeded, 1 failed (tolerated), interrupted during call "hang", 1 not run`)
+}
+
+// a value captured from call A appears in call B's path, query,
+// header and body.
+func TestRunCaptureSubstitutesEveryField(t *testing.T) {
+	var rec recorder
+	srv := newMuxServer(t, &rec, map[string]*pathScript{
+		"/read":    {statuses: []int{http.StatusOK}, bodies: []string{`{"seq":42}`}},
+		"/next/42": {statuses: []int{http.StatusOK}},
+	})
+
+	_, err := runRunbook(t, srv, `
+calls:
+  - name: read
+    path: /read
+    capture:
+      seq: '.seq'
+  - name: next
+    method: PUT
+    path: /next/${seq}
+    query:
+      if_seq_no: '${seq}'
+    headers:
+      x-seq: '${seq}'
+    body: '{"seq":${seq}}'
+`)
+	require.NoError(t, err)
+	require.Equal(t, 2, rec.len())
+	got := rec.at(1)
+	assert.Equal(t, "/next/42", got.path)
+	assert.Equal(t, "42", got.query.Get("if_seq_no"))
+	assert.Equal(t, "42", got.header.Get("X-Seq"))
+	assert.Equal(t, `{"seq":42}`, string(got.body))
+}
+
+// string, int and bool captures render correctly, and a float
+// renders without a trailing ".0".
+// This proves the wiring — a captured value reaching the wire in a later
+// call's body — not rendering itself: renderScalar's branches are already
+// covered exhaustively by TestRenderScalar, so one string and one integer
+// row are enough to show substitution carries a rendered value end to end.
+func TestRunCaptureValueTypesRender(t *testing.T) {
+	tests := []struct {
+		name     string
+		respBody string
+		expr     string
+		want     string
+	}{
+		{name: "string", respBody: `{"v":"hello"}`, expr: ".v", want: "hello"},
+		{name: "int", respBody: `{"v":42}`, expr: ".v", want: "42"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var rec recorder
+			srv := newMuxServer(t, &rec, map[string]*pathScript{
+				"/read": {statuses: []int{http.StatusOK}, bodies: []string{tt.respBody}},
+				"/echo": {statuses: []int{http.StatusOK}},
+			})
+
+			src := fmt.Sprintf(`
+calls:
+  - name: read
+    path: /read
+    capture:
+      v: '%s'
+  - name: echo
+    path: /echo
+    body: '{"got":"${v}"}'
+`, tt.expr)
+			_, err := runRunbook(t, srv, src)
+			require.NoError(t, err)
+			require.Equal(t, 2, rec.len())
+			assert.Equal(t, fmt.Sprintf(`{"got":%q}`, tt.want), string(rec.at(1).body))
+		})
+	}
+}
+
+// each of the five capture-failure classes produces its own message and
+// halts the run without ever printing the ok line.
+func TestRunCaptureFailureClasses(t *testing.T) {
+	tests := []struct {
+		name          string
+		body          string
+		maxBodyBuffer string // "" leaves max-body-buffer unset
+		expr          string
+		wantContains  []string
+	}{
+		{name: "empty body", body: "", expr: ".v", wantContains: []string{`capture "v"`, "empty"}},
+		{name: "not valid JSON", body: "not-json", expr: ".v", wantContains: []string{"not valid JSON"}},
+		{
+			name:          "over max-body-buffer",
+			body:          fmt.Sprintf(`{"v":1,"pad":%q}`, strings.Repeat("a", 2048)),
+			maxBodyBuffer: "1KiB",
+			expr:          ".v",
+			wantContains:  []string{"max-body-buffer"},
+		},
+		{
+			// .missing would yield null (a jq object index on an absent key is
+			// null, not "no output"), which is "not a scalar", not this class: a
+			// select() filter with no matches is what actually emits nothing.
+			name: "expression matches nothing", body: `{"v":[1,2,3]}`, expr: ".v[] | select(. == 99)",
+			wantContains: []string{"matched nothing"},
+		},
+		{name: "expression yields an object", body: `{"v":{"a":1}}`, expr: ".v", wantContains: []string{"not a scalar"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := newMuxServer(t, &recorder{}, map[string]*pathScript{
+				"/x": {statuses: []int{http.StatusOK}, bodies: []string{tt.body}},
+			})
+			src := "calls:\n  - name: read\n    path: /x\n"
+			if tt.maxBodyBuffer != "" {
+				src += "    max-body-buffer: '" + tt.maxBodyBuffer + "'\n"
+			}
+			src += "    capture:\n      v: '" + tt.expr + "'\n"
+
+			out, err := runRunbook(t, srv, src)
+			require.Error(t, err)
+			for _, want := range tt.wantContains {
+				assert.ErrorContains(t, err, want)
+			}
+			assert.NotContains(t, out, `call "read": ok`, "a failing capture must not print the ok line")
+		})
+	}
+}
+
+// an oversized body does not affect a non-capturing call, and
+// max-body-buffer: 0 makes even a large body capturable. The capturing-call-
+// over-cap-fails case is covered by TestRunCaptureFailureClasses.
+func TestRunCaptureBodySizeInteractsWithMaxBodyBuffer(t *testing.T) {
+	body := fmt.Sprintf(`{"v":1,"pad":%q}`, strings.Repeat("a", 2048))
+
+	t.Run("non-capturing call over cap still succeeds", func(t *testing.T) {
+		srv := newMuxServer(t, &recorder{}, map[string]*pathScript{
+			"/x": {statuses: []int{http.StatusOK}, bodies: []string{body}},
+		})
+		_, err := runRunbook(t, srv, `
+calls:
+  - name: read
+    path: /x
+    max-body-buffer: '1KiB'
+`)
+		require.NoError(t, err)
+	})
+
+	t.Run("capturing call with max-body-buffer 0 captures from a large body", func(t *testing.T) {
+		srv := newMuxServer(t, &recorder{}, map[string]*pathScript{
+			"/x": {statuses: []int{http.StatusOK}, bodies: []string{body}},
+		})
+		out, err := runRunbook(t, srv, `
+calls:
+  - name: read
+    path: /x
+    max-body-buffer: '0'
+    capture:
+      v: '.v'
+`)
+		require.NoError(t, err)
+		assert.Contains(t, out, `call "read": ok`)
+	})
+}
+
+// $${seq} reaches the server as the literal ${seq}.
+func TestRunEscapedDollarBraceIsLiteral(t *testing.T) {
+	var rec recorder
+	srv := newMuxServer(t, &rec, map[string]*pathScript{
+		"/read": {statuses: []int{http.StatusOK}, bodies: []string{`{"seq":42}`}},
+		"/next": {statuses: []int{http.StatusOK}},
+	})
+
+	_, err := runRunbook(t, srv, `
+calls:
+  - name: read
+    path: /read
+    capture:
+      seq: '.seq'
+  - name: next
+    path: /next
+    body: '{"literal":"$${seq}"}'
+`)
+	require.NoError(t, err)
+	require.Equal(t, 2, rec.len())
+	assert.Equal(t, `{"literal":"${seq}"}`, string(rec.at(1).body))
+}
+
+// with Verbose, name=value appears on stderr for each capture.
+func TestRunCaptureVerboseLogsNameValue(t *testing.T) {
+	srv := newMuxServer(t, &recorder{}, map[string]*pathScript{
+		"/read": {statuses: []int{http.StatusOK}, bodies: []string{`{"seq":42,"note":"ok"}`}},
+	})
+
+	rb, err := Load(strings.NewReader(`
+calls:
+  - name: read
+    path: /read
+    capture:
+      seq: '.seq'
+      note: '.note'
+`), "")
+	require.NoError(t, err)
+
+	var stderr bytes.Buffer
+	runner := &Runner{Client: http.DefaultClient, Endpoint: srv.URL, Stderr: &stderr, Verbose: true}
+	require.NoError(t, runner.Run(context.Background(), rb))
+
+	out := stderr.String()
+	assert.Contains(t, out, "seq=42\n")
+	assert.Contains(t, out, "note=ok\n")
+}
+
+// the two documented jq escape hatches — tojson to splice a
+// whole object into a later body, and @json to safely interpolate a string
+// that may contain quotes or newlines — work end to end.
+func TestRunCaptureJQEscapeHatches(t *testing.T) {
+	t.Run("tojson splices an object unquoted", func(t *testing.T) {
+		var rec recorder
+		srv := newMuxServer(t, &rec, map[string]*pathScript{
+			"/read":  {statuses: []int{http.StatusOK}, bodies: []string{`{"_source":{"a":1,"b":"x"}}`}},
+			"/write": {statuses: []int{http.StatusOK}},
+		})
+
+		_, err := runRunbook(t, srv, `
+calls:
+  - name: read
+    path: /read
+    capture:
+      src: '._source | tojson'
+  - name: write
+    path: /write
+    body: '{"doc":${src}}'
+`)
+		require.NoError(t, err)
+		require.Equal(t, 2, rec.len())
+
+		var got map[string]any
+		require.NoError(t, json.Unmarshal(rec.at(1).body, &got))
+		assert.Equal(t, map[string]any{"doc": map[string]any{"a": float64(1), "b": "x"}}, got)
+	})
+
+	t.Run("@json escapes quotes and a newline", func(t *testing.T) {
+		raw := "has \"quotes\" and\na newline"
+		payload, err := json.Marshal(map[string]string{"reason": raw})
+		require.NoError(t, err)
+
+		var rec recorder
+		srv := newMuxServer(t, &rec, map[string]*pathScript{
+			"/read":  {statuses: []int{http.StatusOK}, bodies: []string{string(payload)}},
+			"/write": {statuses: []int{http.StatusOK}},
+		})
+
+		_, err = runRunbook(t, srv, `
+calls:
+  - name: read
+    path: /read
+    capture:
+      reason: '.reason | @json'
+  - name: write
+    path: /write
+    body: '{"msg":${reason}}'
+`)
+		require.NoError(t, err)
+		require.Equal(t, 2, rec.len())
+
+		var got map[string]string
+		require.NoError(t, json.Unmarshal(rec.at(1).body, &got))
+		assert.Equal(t, raw, got["msg"])
+	})
+}
+
+// Substitution must happen on copies, never on Call's own strings: a reused
+// Runner running the same *Runbook twice must resubstitute fresh values each
+// time, not carry over the first run's resolved path from a mutated Call.
+func TestRunReusableAcrossMultipleRunsWithDifferentCaptures(t *testing.T) {
+	var rec recorder
+	srv := newMuxServer(t, &rec, map[string]*pathScript{
+		"/read":    {statuses: []int{http.StatusOK}, bodies: []string{`{"seq":42}`, `{"seq":99}`}},
+		"/next/42": {statuses: []int{http.StatusOK}},
+		"/next/99": {statuses: []int{http.StatusOK}},
+	})
+
+	rb, err := Load(strings.NewReader(`
+calls:
+  - name: read
+    path: /read
+    capture:
+      seq: '.seq'
+  - name: next
+    path: /next/${seq}
+`), "")
+	require.NoError(t, err)
+
+	runner := &Runner{Client: http.DefaultClient, Endpoint: srv.URL, Stderr: io.Discard}
+	require.NoError(t, runner.Run(context.Background(), rb))
+	require.NoError(t, runner.Run(context.Background(), rb))
+
+	require.Equal(t, 4, rec.len())
+	assert.Equal(t, []string{"/read", "/next/42", "/read", "/next/99"}, rec.paths())
+}
+
+// A capture must run against the final response the engine accepted, not
+// any earlier retried one.
+func TestRunCaptureUsesFinalResponseAfterRetries(t *testing.T) {
+	var rec recorder
+	srv := newMuxServer(t, &rec, map[string]*pathScript{
+		"/read": {statuses: []int{http.StatusServiceUnavailable, http.StatusOK}, bodies: []string{`{"seq":1}`, `{"seq":2}`}},
+		"/next": {statuses: []int{http.StatusOK}},
+	})
+
+	_, err := runRunbook(t, srv, `
+calls:
+  - name: read
+    path: /read
+    retry: 2
+    backoff-initial: '1ms'
+    capture:
+      seq: '.seq'
+  - name: next
+    path: /next
+    body: '{"seq":${seq}}'
+`)
+	require.NoError(t, err)
+	require.Equal(t, 3, rec.len())
+	assert.Equal(t, `{"seq":2}`, string(rec.at(2).body), "capture runs against the final response, not the retried 503")
+}
+
+func TestRunCaptureOnToleratedCall(t *testing.T) {
+	t.Run("the call itself fails: nothing captured, run continues", func(t *testing.T) {
+		var rec recorder
+		srv := newMuxServer(t, &rec, map[string]*pathScript{
+			"/fails": {statuses: []int{http.StatusBadRequest}, bodies: []string{`{"error":"bad"}`}},
+			"/next":  {statuses: []int{http.StatusOK}},
+		})
+
+		rb, err := Load(strings.NewReader(`
+calls:
+  - name: fails
+    path: /fails
+    abort-on: [400]
+    continue-on-failure: true
+    capture:
+      seq: '.seq'
+  - name: next
+    path: /next
+`), "")
+		require.NoError(t, err)
+
+		var stderr bytes.Buffer
+		runner := &Runner{Client: http.DefaultClient, Endpoint: srv.URL, Stderr: &stderr, Verbose: true}
+		require.NoError(t, runner.Run(context.Background(), rb))
+
+		require.Equal(t, 2, rec.len(), "the run continues past the tolerated failure")
+		assert.NotContains(t, stderr.String(), "seq=", "a failed call never reaches capture extraction")
+	})
+
+	t.Run("the call succeeds but its capture fails: tolerated, store keeps only earlier captures", func(t *testing.T) {
+		var rec recorder
+		srv := newMuxServer(t, &rec, map[string]*pathScript{
+			"/first":  {statuses: []int{http.StatusOK}, bodies: []string{`{"a":"1"}`}},
+			"/second": {statuses: []int{http.StatusOK}, bodies: []string{`{"b":{"x":1}}`}}, // .b is an object: not a scalar
+			"/third":  {statuses: []int{http.StatusOK}},
+		})
+
+		rb, err := Load(strings.NewReader(`
+calls:
+  - name: first
+    path: /first
+    capture:
+      a: '.a'
+  - name: second
+    path: /second
+    continue-on-failure: true
+    capture:
+      b: '.b'
+  - name: third
+    path: /third
+    body: '{"got":"${a}"}'
+`), "")
+		require.NoError(t, err)
+
+		var stderr bytes.Buffer
+		runner := &Runner{Client: http.DefaultClient, Endpoint: srv.URL, Stderr: &stderr, Verbose: true}
+		require.NoError(t, runner.Run(context.Background(), rb))
+
+		require.Equal(t, 3, rec.len(), "the run continues past the tolerated capture failure")
+		assert.Equal(t, `{"got":"1"}`, string(rec.at(2).body), "the earlier capture is still in the store")
+		assert.NotContains(t, stderr.String(), "b=", "the failed capture on the tolerated call was never stored")
+		assert.Contains(t, stderr.String(), `call "second": failed`)
+	})
+}
+
+// A captured value that would rewrite the request's target must fail
+// the call, and the request it would have built must never be sent.
+func TestRunCaptureSubstitutionRejectsUnsafePathValue(t *testing.T) {
+	var rec recorder
+	srv := newMuxServer(t, &rec, map[string]*pathScript{
+		"/read": {statuses: []int{http.StatusOK}, bodies: []string{`{"id":"../../_all"}`}},
+	})
+
+	out, err := runRunbook(t, srv, `
+calls:
+  - name: read
+    path: /read
+    capture:
+      id: '.id'
+  - name: next
+    path: /next/${id}
+`)
+	require.Error(t, err)
+	assert.ErrorContains(t, err, `capture ${id} = "../../_all" cannot be substituted into path`)
+	assert.ErrorContains(t, err, `contains "/"`)
+	require.Equal(t, 1, rec.len(), "the /next request must never be sent")
+	assert.Contains(t, out, `call "next": failed (request not sent)`)
+}
+
+// A captured value of ".." contains none of "/ ? # %", so the
+// value-level check alone would let it through; a normalizing proxy would
+// then collapse "/next/.." to the parent path.
+func TestRunCaptureSubstitutionRejectsDotDotSegment(t *testing.T) {
+	var rec recorder
+	srv := newMuxServer(t, &rec, map[string]*pathScript{
+		"/read": {statuses: []int{http.StatusOK}, bodies: []string{`{"id":".."}`}},
+	})
+
+	out, err := runRunbook(t, srv, `
+calls:
+  - name: read
+    path: /read
+    capture:
+      id: '.id'
+  - name: next
+    path: /next/${id}
+`)
+	require.Error(t, err)
+	assert.ErrorContains(t, err, `contains a ".." segment`)
+	require.Equal(t, 1, rec.len(), "the /next request must never be sent")
+	assert.Contains(t, out, `call "next": failed (request not sent)`)
+}
+
+// Neither the runbook author's literal "." nor a captured "."
+// is ".." on its own, but concatenated across the template boundary they
+// compose into a ".." segment — a value-only check can be walked around this
+// way, so the check must run on the resolved path.
+func TestRunCaptureSubstitutionRejectsComposedDotDotSegment(t *testing.T) {
+	var rec recorder
+	srv := newMuxServer(t, &rec, map[string]*pathScript{
+		"/read": {statuses: []int{http.StatusOK}, bodies: []string{`{"id":"."}`}},
+	})
+
+	out, err := runRunbook(t, srv, `
+calls:
+  - name: read
+    path: /read
+    capture:
+      id: '.id'
+  - name: next
+    path: /next/.${id}
+`)
+	require.Error(t, err)
+	assert.ErrorContains(t, err, `contains a ".." segment`)
+	require.Equal(t, 1, rec.len(), "the /next request must never be sent")
+	assert.Contains(t, out, `call "next": failed (request not sent)`)
+}
+
+// The same value that's rejected in path must still reach a body or a query
+// value verbatim: only path substitution changes what is requested.
+func TestRunCaptureSubstitutionAllowsUnsafeValueInBodyAndQuery(t *testing.T) {
+	var rec recorder
+	srv := newMuxServer(t, &rec, map[string]*pathScript{
+		"/read": {statuses: []int{http.StatusOK}, bodies: []string{`{"id":"../../_all"}`}},
+		"/next": {statuses: []int{http.StatusOK}},
+	})
+
+	_, err := runRunbook(t, srv, `
+calls:
+  - name: read
+    path: /read
+    capture:
+      id: '.id'
+  - name: next
+    path: /next
+    query:
+      filter: '${id}'
+    body: '{"id":"${id}"}'
+`)
+	require.NoError(t, err)
+	require.Equal(t, 2, rec.len())
+	got := rec.at(1)
+	assert.Equal(t, "../../_all", got.query.Get("filter"))
+	assert.Equal(t, `{"id":"../../_all"}`, string(got.body))
+}
+
+// An integer beyond float64's 2^53 exact range must round-trip exactly
+// through a capture into a later call.
+func TestRunCaptureLargeIntegerRoundTripsExactly(t *testing.T) {
+	var rec recorder
+	srv := newMuxServer(t, &rec, map[string]*pathScript{
+		"/read": {statuses: []int{http.StatusOK}, bodies: []string{`{"seq":1234567890123456789}`}},
+		"/next": {statuses: []int{http.StatusOK}},
+	})
+
+	_, err := runRunbook(t, srv, `
+calls:
+  - name: read
+    path: /read
+    capture:
+      seq: '.seq'
+  - name: next
+    path: /next
+    query:
+      seq: '${seq}'
+`)
+	require.NoError(t, err)
+	require.Equal(t, 2, rec.len())
+	assert.Equal(t, "1234567890123456789", rec.at(1).query.Get("seq"))
+}
+
+// A capture failure is exactly the case where the response body is the
+// diagnosis, so it must be echoed like a failing-body call's is.
+func TestRunCaptureFailureEchoesResponseBody(t *testing.T) {
+	srv := newMuxServer(t, &recorder{}, map[string]*pathScript{
+		"/x": {statuses: []int{http.StatusOK}, bodies: []string{`{"v":{"a":1}}`}},
+	})
+
+	out, err := runRunbook(t, srv, `
+calls:
+  - name: read
+    path: /x
+    capture:
+      v: '.v'
+`)
+	require.Error(t, err)
+	assert.Contains(t, out, `  {"v":{"a":1}}`, "the body that caused the capture failure must be echoed, indented")
 }

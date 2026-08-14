@@ -517,16 +517,276 @@ calls:
 	}
 }
 
-func TestLoadAcceptsCaptureKey(t *testing.T) {
+// Headers keep defaults separate from the call's own (mergeHeaders), so
+// inherited values get their own reference-check pass: an unresolvable ref in
+// a defaults header fails the load unless the call overrides that header —
+// by canonical name, any case spelling — in which case the default never
+// ships and must not be checked.
+func TestLoadInheritedHeaderRefs(t *testing.T) {
+	src := `
+defaults:
+  headers:
+    x-seq: '${seq}'
+calls:
+  - name: first
+    path: /a
+`
+	_, err := Load(strings.NewReader(src), "")
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "inherited from defaults")
+
+	overridden := strings.Replace(src, "path: /a\n", "path: /a\n    headers:\n      X-Seq: literal\n", 1)
+	_, err = Load(strings.NewReader(overridden), "")
+	require.NoError(t, err, "an overridden default header must not be ref-checked")
+}
+
+// capture: parses in document order; a call without it has an
+// empty slice.
+func TestLoadCaptureParsesInDocumentOrder(t *testing.T) {
 	src := `
 calls:
   - name: read_doc
     path: /my-index/_doc/1
     capture:
       seq: '._seq_no'
+      term: '._primary_term'
+  - name: other_call
+    path: /other
 `
-	_, err := Load(strings.NewReader(src), "")
-	require.NoError(t, err, "capture: must load; its parsing lands with the capture feature")
+	rb, err := Load(strings.NewReader(src), "")
+	require.NoError(t, err)
+	require.Len(t, rb.Calls, 2)
+
+	require.Len(t, rb.Calls[0].Capture, 2)
+	assert.Equal(t, "seq", rb.Calls[0].Capture[0].Name)
+	assert.Equal(t, "term", rb.Calls[0].Capture[1].Name)
+	assert.Empty(t, rb.Calls[1].Capture)
+}
+
+func TestLoadCaptureErrors(t *testing.T) {
+	tests := []struct {
+		name         string
+		src          string
+		wantContains []string
+	}{
+		{
+			name: "bad jq in a capture expression names the call and the capture",
+			src: `
+calls:
+  - name: read_doc
+    path: /my-index/_doc/1
+    capture:
+      seq: '.foo['
+`,
+			wantContains: []string{"read_doc", "seq"},
+		},
+		{
+			name: "duplicate capture name across two calls names both calls",
+			src: `
+calls:
+  - name: read_doc
+    path: /my-index/_doc/1
+    capture:
+      seq: '._seq_no'
+  - name: read_doc_again
+    path: /my-index/_doc/2
+    capture:
+      seq: '._seq_no'
+`,
+			wantContains: []string{"read_doc", "read_doc_again", "seq"},
+		},
+		{
+			name: "duplicate capture name within a single call names the call, not itself twice",
+			src: `
+calls:
+  - name: read_doc
+    path: /my-index/_doc/1
+    capture:
+      seq: '._seq_no'
+      seq: '._primary_term'
+`,
+			wantContains: []string{"declared twice", "read_doc", "seq"},
+		},
+		{
+			name: "unknown ${name} reference names the referencing call and the name",
+			src: `
+calls:
+  - name: read_doc
+    path: /my-index/_doc/1
+  - name: update_doc
+    path: /my-index/_doc/${seq}
+`,
+			wantContains: []string{"update_doc", "seq"},
+		},
+		{
+			name: "forward reference (capture declared by a later call)",
+			src: `
+calls:
+  - name: update_doc
+    path: /my-index/_doc/${seq}
+  - name: read_doc
+    path: /my-index/_doc/1
+    capture:
+      seq: '._seq_no'
+`,
+			wantContains: []string{"update_doc", "seq"},
+		},
+		{
+			name: "reference to a capture declared by a continue-on-failure: true call",
+			src: `
+calls:
+  - name: read_doc
+    path: /my-index/_doc/1
+    continue-on-failure: true
+    capture:
+      seq: '._seq_no'
+  - name: update_doc
+    path: /my-index/_doc/${seq}
+`,
+			wantContains: []string{"update_doc", "read_doc", "seq", "continue-on-failure"},
+		},
+		{
+			name: "unterminated ${ in a body is a load error, not a literal shipped to the server",
+			src: `
+calls:
+  - name: read_doc
+    path: /my-index/_doc/1
+    body: '{"a":"x", "b":${seq'
+`,
+			wantContains: []string{"read_doc", "unterminated"},
+		},
+		{
+			name: "${ in a query key is rejected rather than shipped or substituted",
+			src: `
+calls:
+  - name: read_doc
+    path: /my-index/_doc/1
+    query:
+      '${nope}': v
+`,
+			wantContains: []string{"read_doc", "query", "${nope}", "references are not supported in query/header keys"},
+		},
+		{
+			name: "${ in a header key is rejected rather than shipped or substituted",
+			src: `
+calls:
+  - name: read_doc
+    path: /my-index/_doc/1
+    headers:
+      '${nope}': v
+`,
+			wantContains: []string{"read_doc", "header", "${nope}", "references are not supported in query/header keys"},
+		},
+		{
+			name: "empty capture name",
+			src: `
+calls:
+  - name: read_doc
+    path: /my-index/_doc/1
+    capture:
+      '': '._seq_no'
+`,
+			wantContains: []string{"read_doc", "name must match"},
+		},
+		{
+			name: "capture name with a space",
+			src: `
+calls:
+  - name: read_doc
+    path: /my-index/_doc/1
+    capture:
+      'has space': '._seq_no'
+`,
+			wantContains: []string{"read_doc", "has space", "name must match"},
+		},
+		{
+			name: "capture name with a closing brace is permanently unreferenceable",
+			src: `
+calls:
+  - name: read_doc
+    path: /my-index/_doc/1
+    capture:
+      'a}b': '._seq_no'
+`,
+			wantContains: []string{"read_doc", "a}b", "name must match"},
+		},
+		{
+			name: "capture name that looks like a reference",
+			src: `
+calls:
+  - name: read_doc
+    path: /my-index/_doc/1
+    capture:
+      '${x}': '._seq_no'
+`,
+			wantContains: []string{"read_doc", "${x}", "name must match"},
+		},
+		{
+			name: "an unresolvable reference inherited from defaults: says so",
+			src: `
+defaults:
+  query:
+    v: '${seq}'
+calls:
+  - name: first
+    path: /a
+`,
+			wantContains: []string{"first", "seq", "inherited from defaults"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := Load(strings.NewReader(tt.src), "")
+			require.Error(t, err)
+			for _, want := range tt.wantContains {
+				assert.ErrorContains(t, err, want)
+			}
+		})
+	}
+}
+
+// ${name} in path, query value, header value and body all
+// validate; $${literal} is accepted and does not count as a reference.
+func TestLoadReferenceInEveryField(t *testing.T) {
+	src := `
+calls:
+  - name: read_doc
+    path: /my-index/_doc/1
+    capture:
+      seq: '._seq_no'
+  - name: update_doc
+    path: /my-index/_doc/${seq}
+    query:
+      version: '${seq}'
+    headers:
+      x-seq: '${seq}'
+    body: '{"seq":${seq},"literal":"$${seq}"}'
+`
+	rb, err := Load(strings.NewReader(src), "")
+	require.NoError(t, err)
+	require.Len(t, rb.Calls, 2)
+	assert.Equal(t, `{"seq":${seq},"literal":"$${seq}"}`, string(rb.Calls[1].Body),
+		"the raw templated body is kept as-is; substitution happens at run time")
+}
+
+// an unknown ${name} inside an @file body is a load error naming
+// the resolved file path as well as the call.
+func TestLoadReferenceUnknownInFileBody(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "index-settings.json"), []byte(`{"number_of_replicas":${replicas}}`), 0o600))
+
+	src := `
+calls:
+  - name: create_index
+    path: /my-index
+    body: '@index-settings.json'
+`
+	_, err := Load(strings.NewReader(src), dir)
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "create_index")
+	assert.ErrorContains(t, err, "replicas")
+	assert.ErrorContains(t, err, filepath.Join(dir, "index-settings.json"))
 }
 
 func TestLoadBackoffJitter(t *testing.T) {
