@@ -1,3 +1,7 @@
+// Command gen reads the vendored OpenSearch OpenAPI spec and writes
+// paths_gen.go and body_gen.go into the parent apispec package. It is a
+// separate Go module so its OpenAPI parser never enters the shipped binary's
+// dependency graph. Run it via `make update-spec` or `go generate ./...`.
 package main
 
 import (
