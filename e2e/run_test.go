@@ -135,3 +135,30 @@ calls:
 	require.Equal(t, 1, check.exitCode)
 	assert.Contains(t, check.stdout, "index_not_found_exception")
 }
+
+// Creating an index needs admin rights, so success as ci_reader proves the
+// runbook's credentials, not asUser's -u/--password flags, were used.
+func TestRunbook_CredentialsOverrideFlags(t *testing.T) {
+	const idx = "e2e-runbook-creds-override"
+	t.Cleanup(func() {
+		_, _ = execOsapi(nil, adminArgs("-X", "DELETE", "--path", "/"+idx)...)
+	})
+
+	dir := t.TempDir()
+	runbookPath := filepath.Join(dir, "runbook.yaml")
+	require.NoError(t, os.WriteFile(runbookPath, []byte(fmt.Sprintf(`
+defaults:
+  credentials:
+    username: '%s'
+    password: '%s'
+calls:
+  - name: create_index
+    method: PUT
+    path: /%s
+    success-when: '.acknowledged'
+`, adminUser, adminPass, idx)), 0o600))
+
+	res := runOsapi(t, nil, asUser(readerUser, readerPass, "run", runbookPath)...)
+	require.Equal(t, 0, res.exitCode, "stderr: %s", res.stderr)
+	assert.Contains(t, res.stderr, "run: 1 succeeded")
+}
