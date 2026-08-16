@@ -284,6 +284,9 @@ func loadDefaults(node *yaml.Node, baseDir string) (callSpec, *Credentials, erro
 	if err := node.Decode(&spec); err != nil {
 		return callSpec{}, nil, fmt.Errorf("%s: %w", ref, err)
 	}
+	if err := checkDefaultsSecretRefs(&spec); err != nil {
+		return callSpec{}, nil, fmt.Errorf("%s: %w", ref, err)
+	}
 
 	if err := validateMethod(spec.Method); err != nil {
 		return callSpec{}, nil, fmt.Errorf("%s: %w", ref, err)
@@ -303,8 +306,14 @@ func loadDefaults(node *yaml.Node, baseDir string) (callSpec, *Credentials, erro
 	}
 	// nil stdin: same reasoning as loadCall. A runbook has no stdin of its
 	// own, so "@-" in defaults is rejected the same as per-call.
-	if _, _, err := osclient.ReadBody(bodyArg, nil); err != nil {
+	body, _, err := osclient.ReadBody(bodyArg, nil)
+	if err != nil {
 		return callSpec{}, nil, fmt.Errorf("%s: reading body: %w", ref, err)
+	}
+	// Scanned on the resolved content, not on spec.Body: an "@file" argument
+	// is a file name, and a file may legally be named "${secret:x}.json".
+	if err := checkSecretPrefix(string(body), "body"); err != nil {
+		return callSpec{}, nil, fmt.Errorf("%s: %w", ref, err)
 	}
 
 	return spec, creds, nil
@@ -713,6 +722,48 @@ func rejectRefInKey(key, ref, field string) error {
 	return nil
 }
 
+// errReservedSecretPrefix marks a ${secret:...} reference outside defaults:
+// credentials:. Checked in both checkRefs and checkDefaultsSecretRefs, since
+// a value every call overrides never reaches checkRefs.
+var errReservedSecretPrefix = errors.New("${secret:...} is only supported in defaults: credentials")
+
+// checkDefaultsSecretRefs rejects ${secret:...} in a defaults: block's Query
+// or Headers, even where every call overrides the value. The body is checked
+// by the caller instead, on the resolved content: spec.Body may be an "@file"
+// argument, and a file named "${secret:x}.json" is a legal name, not a
+// reference. Keys are sorted for the same reason loader.call sorts them: a
+// block with several bad values always names the same one.
+func checkDefaultsSecretRefs(spec *callSpec) error {
+	for _, k := range slices.Sorted(maps.Keys(spec.Query)) {
+		if err := checkSecretPrefix(spec.Query[k], "query "+k); err != nil {
+			return err
+		}
+	}
+	for _, k := range slices.Sorted(maps.Keys(spec.Headers)) {
+		if err := checkSecretPrefix(spec.Headers[k], "header "+k); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// checkSecretPrefix reports only a ${secret:...} reference in s, naming field.
+// An unterminated "${" is accepted here: this runs on a defaults value, and an
+// overridden default never reaches a request. Every value that does ship is
+// scanned again by checkRefs, which rejects that form.
+func checkSecretPrefix(s, field string) error {
+	_, err := scanTemplate(s, func(name string) (string, error) {
+		if strings.HasPrefix(name, "secret:") {
+			return "", fmt.Errorf("%s: %w", field, errReservedSecretPrefix)
+		}
+		return "", nil
+	})
+	if errors.Is(err, errReservedSecretPrefix) {
+		return err
+	}
+	return nil
+}
+
 // checkRefs validates every ${name} reference in s against declared, the
 // capture names known so far, naming ref in any error. It can't distinguish
 // an unknown name from a forward reference: a left-to-right walk sees them
@@ -726,6 +777,9 @@ func checkRefs(s string, declared map[string]capDecl, ref string, inherited bool
 		source = " (inherited from defaults:)"
 	}
 	_, err := scanTemplate(s, func(name string) (string, error) {
+		if strings.HasPrefix(name, "secret:") {
+			return "", errReservedSecretPrefix
+		}
 		decl, ok := declared[name]
 		switch {
 		case !ok:

@@ -914,3 +914,167 @@ func TestLoadDefaultsMethodToGet(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, http.MethodGet, rb.Calls[0].Method)
 }
+
+// ${secret:...} is reserved for defaults: credentials: only. A reference to
+// it in path, query, header, or body must fail load, not resolve as capture.
+func TestLoadReservedSecretPrefixOutsideCredentials(t *testing.T) {
+	tests := []struct {
+		name string
+		src  string
+	}{
+		{
+			name: "path",
+			src: `
+calls:
+  - name: c
+    path: /my-index/_doc/${secret:token}
+`,
+		},
+		{
+			name: "query value",
+			src: `
+calls:
+  - name: c
+    path: /x
+    query:
+      token: '${secret:token}'
+`,
+		},
+		{
+			name: "header value",
+			src: `
+calls:
+  - name: c
+    path: /x
+    headers:
+      x-token: '${secret:token}'
+`,
+		},
+		{
+			name: "body",
+			src: `
+calls:
+  - name: c
+    path: /x
+    body: '{"token":"${secret:token}"}'
+`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := Load(strings.NewReader(tt.src), "")
+			require.Error(t, err)
+			assert.ErrorContains(t, err, "only supported in defaults: credentials")
+		})
+	}
+}
+
+// A ${secret:...} in a defaults: header that every call overrides must
+// still fail the load, attributed to defaults itself. Same escape-defect
+// class as TestLoadDefaultsInvalidValueEscapesWhenEveryCallOverridesIt, for
+// an invalid field value instead.
+func TestLoadDefaultsSecretPrefixEscapesWhenEveryCallOverridesIt(t *testing.T) {
+	src := `
+defaults:
+  headers:
+    x-token: '${secret:token}'
+
+calls:
+  - name: first_call
+    path: /a
+    headers:
+      X-Token: literal
+`
+	_, err := Load(strings.NewReader(src), "")
+	require.Error(t, err, "a reserved-prefix default must fail the load even when every call overrides it")
+	assert.Regexp(t, `defaults \(line \d+\)`, err.Error())
+	assert.ErrorContains(t, err, "header x-token")
+	assert.ErrorContains(t, err, "only supported in defaults: credentials")
+}
+
+// The defaults query is layered per key, so an overridden value never
+// reaches checkRefs either.
+func TestLoadDefaultsSecretPrefixInQueryEveryCallOverridesIt(t *testing.T) {
+	src := `
+defaults:
+  query:
+    token: '${secret:token}'
+
+calls:
+  - name: first_call
+    path: /a
+    query:
+      token: literal
+`
+	_, err := Load(strings.NewReader(src), "")
+
+	require.Error(t, err, "a reserved-prefix default must fail the load even when every call overrides it")
+	assert.Regexp(t, `defaults \(line \d+\)`, err.Error())
+	assert.ErrorContains(t, err, "query token")
+	assert.ErrorContains(t, err, "only supported in defaults: credentials")
+}
+
+// An "@file" argument is a file name, not a template, so a file may legally
+// be named with what looks like a reference.
+func TestLoadDefaultsFileNameLookingLikeSecretRefLoads(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "${secret:x}.json"),
+		[]byte(`{"ok":true}`), 0o600))
+
+	src := `
+defaults:
+  method: POST
+  body: '@${secret:x}.json'
+
+calls:
+  - name: first_call
+    path: /a
+`
+	rb, err := Load(strings.NewReader(src), dir)
+
+	require.NoError(t, err)
+	assert.Equal(t, []byte(`{"ok":true}`), rb.Calls[0].Body)
+}
+
+// The defaults body is scanned on resolved file content, not the literal
+// "@file" argument. A reference inside the file can't escape.
+func TestLoadDefaultsSecretPrefixInFileBodyEveryCallOverrides(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "payload.json"),
+		[]byte(`{"token":"${secret:token}"}`), 0o600))
+
+	src := `
+defaults:
+  body: '@payload.json'
+
+calls:
+  - name: first_call
+    method: POST
+    path: /a
+    body: '{"ok":true}'
+`
+	_, err := Load(strings.NewReader(src), dir)
+
+	require.Error(t, err, "a reserved-prefix default must fail the load even when every call overrides it")
+	assert.Regexp(t, `defaults \(line \d+\)`, err.Error())
+	assert.ErrorContains(t, err, "only supported in defaults: credentials")
+}
+
+// A capture named "secret" (no colon) is a normal capture, not the reserved
+// secret: prefix. ${secret} still resolves as a reference to it.
+func TestLoadCaptureNamedSecretIsNotConfusedWithReservedPrefix(t *testing.T) {
+	src := `
+calls:
+  - name: read_doc
+    path: /my-index/_doc/1
+    capture:
+      secret: '._id'
+  - name: use_secret
+    path: /my-index/_doc/${secret}
+`
+	rb, err := Load(strings.NewReader(src), "")
+
+	require.NoError(t, err, "the reserved prefix must not swallow a capture named secret")
+	require.Len(t, rb.Calls, 2)
+}
