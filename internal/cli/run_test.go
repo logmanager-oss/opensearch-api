@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -336,6 +337,201 @@ calls:
 			assert.NotContains(t, stderr, "Usage:", "SilenceUsage must match root")
 		})
 	}
+}
+
+// Runbook credentials win over -u/--password: the runbook author's values
+// are authoritative, not a default to override.
+func TestRunRunbookCredentialsBeatFlags(t *testing.T) {
+	var rec capture
+	srv := newServer(t, &rec, []int{http.StatusOK})
+
+	path := writeRunbook(t, t.TempDir(), `
+defaults:
+  credentials:
+    username: rb_user
+    password: rb_pass
+calls:
+  - name: c
+    path: /x
+`)
+
+	_, stderr, err := run(t, nil, "run", path, "--endpoint", srv.URL,
+		"-u", "other", "--password", "otherpass")
+	require.NoError(t, err)
+	require.Equal(t, 1, rec.len())
+	assert.Equal(t, "rb_user", rec.at(0).user)
+	assert.Equal(t, "rb_pass", rec.at(0).pass)
+
+	// A live run overrides silently by design, and no identity reaches
+	// stderr. Only the dry-run plan announces the block.
+	assert.NotContains(t, stderr, "credentials")
+	for _, v := range []string{"rb_user", "rb_pass", "other", "otherpass"} {
+		assert.NotContains(t, stderr, v)
+	}
+}
+
+// Runbook credentials must also beat OPENSEARCH_USERNAME/PASSWORD: the env
+// path through config.Resolve (resolve.go) is separate code from the flag
+// path above, needing its own proof.
+func TestRunRunbookCredentialsBeatEnv(t *testing.T) {
+	t.Setenv("OPENSEARCH_USERNAME", "env_user")
+	t.Setenv("OPENSEARCH_PASSWORD", "env_pass")
+
+	var rec capture
+	srv := newServer(t, &rec, []int{http.StatusOK})
+
+	path := writeRunbook(t, t.TempDir(), `
+defaults:
+  credentials:
+    username: rb_user
+    password: rb_pass
+calls:
+  - name: c
+    path: /x
+`)
+
+	_, _, err := run(t, nil, "run", path, "--endpoint", srv.URL)
+	require.NoError(t, err)
+	require.Equal(t, 1, rec.len())
+	assert.Equal(t, "rb_user", rec.at(0).user)
+	assert.Equal(t, "rb_pass", rec.at(0).pass)
+}
+
+// Inverse of TestRunPasswordResolutionFailsWithoutPassword: runbook
+// credentials mean -u admin without --password must not trigger the
+// non-TTY password-required error.
+func TestRunRunbookCredentialsSkipPasswordPrompt(t *testing.T) {
+	var rec capture
+	srv := newServer(t, &rec, []int{http.StatusOK})
+
+	path := writeRunbook(t, t.TempDir(), `
+defaults:
+  credentials:
+    username: rb_user
+    password: rb_pass
+calls:
+  - name: c
+    path: /x
+`)
+
+	_, _, err := run(t, nil, "run", path, "--endpoint", srv.URL, "-u", "admin")
+	require.NoError(t, err)
+	require.Equal(t, 1, rec.len())
+	assert.Equal(t, "rb_user", rec.at(0).user)
+	assert.Equal(t, "rb_pass", rec.at(0).pass)
+}
+
+func TestRunRunbookCredentialsSecretRefs(t *testing.T) {
+	runbookContent := `
+defaults:
+  credentials:
+    username: '${secret:RB_USER}'
+    password: '${secret:RB_PASS}'
+calls:
+  - name: c
+    path: /x
+`
+
+	t.Run("resolved from process env", func(t *testing.T) {
+		t.Setenv("RB_USER", "secret_user")
+		t.Setenv("RB_PASS", "secret_pass")
+
+		var rec capture
+		srv := newServer(t, &rec, []int{http.StatusOK})
+		path := writeRunbook(t, t.TempDir(), runbookContent)
+
+		_, _, err := run(t, nil, "run", path, "--endpoint", srv.URL)
+		require.NoError(t, err)
+		require.Equal(t, 1, rec.len())
+		assert.Equal(t, "secret_user", rec.at(0).user)
+		assert.Equal(t, "secret_pass", rec.at(0).pass)
+	})
+
+	t.Run("resolved from env-file via LayeredEnv", func(t *testing.T) {
+		var rec capture
+		srv := newServer(t, &rec, []int{http.StatusOK})
+
+		dir := t.TempDir()
+		envPath := filepath.Join(dir, "creds.env")
+		require.NoError(t, os.WriteFile(envPath,
+			[]byte("RB_USER=file_user\nRB_PASS=file_pass\n"), 0o600))
+		path := writeRunbook(t, dir, runbookContent)
+
+		_, _, err := run(t, nil, "run", path, "--endpoint", srv.URL, "--env-file", envPath)
+		require.NoError(t, err)
+		require.Equal(t, 1, rec.len())
+		assert.Equal(t, "file_user", rec.at(0).user)
+		assert.Equal(t, "file_pass", rec.at(0).pass)
+	})
+}
+
+// An unset reference must fail before any request and name the variable. The
+// other field is a literal, so Resolve holds a real credential value while it
+// builds the error: a change that wrapped the whole struct would leak it.
+func TestRunRunbookCredentialsUnsetSecretFailsBeforeRequest(t *testing.T) {
+	tests := []struct {
+		name     string
+		username string
+		password string
+	}{
+		{name: "unset password", username: "rb-literal-user", password: "${secret:RB_MISSING}"},
+		{name: "unset username", username: "${secret:RB_MISSING}", password: "rb-literal-pass"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var rec capture
+			srv := newServer(t, &rec, []int{http.StatusOK})
+
+			path := writeRunbook(t, t.TempDir(), fmt.Sprintf(`
+defaults:
+  credentials:
+    username: '%s'
+    password: '%s'
+calls:
+  - name: c
+    path: /x
+`, tt.username, tt.password))
+
+			_, stderr, err := run(t, nil, "run", path, "--endpoint", srv.URL)
+
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "RB_MISSING")
+			assert.Equal(t, 0, rec.len(), "no request may go out before the credentials resolve")
+			for _, literal := range []string{"rb-literal-user", "rb-literal-pass"} {
+				assert.NotContains(t, err.Error(), literal)
+				assert.NotContains(t, stderr, literal)
+			}
+		})
+	}
+}
+
+// --dry-run succeeds with the secret var unset: it never resolves
+// credentials, so no raw or resolved username/password reaches the plan.
+func TestRunDryRunShowsCredentialsMarker(t *testing.T) {
+	var rec capture
+	srv := newServer(t, &rec, []int{http.StatusOK})
+
+	path := writeRunbook(t, t.TempDir(), `
+defaults:
+  credentials:
+    username: rb_user
+    password: '${secret:RB_PASS}'
+calls:
+  - name: c
+    path: /x
+`)
+
+	stdout, stderr, err := run(t, nil, "run", path, "--dry-run", "--endpoint", srv.URL)
+	require.NoError(t, err)
+	assert.Empty(t, stdout)
+	assert.Equal(t, strings.Join([]string{
+		"dry-run: 1 call(s), no requests sent",
+		"  credentials: defined by runbook (overrides -u/--password and OPENSEARCH_USERNAME/PASSWORD)",
+		"  1. c: GET /x",
+		"",
+	}, "\n"), stderr)
+	assert.Equal(t, 0, rec.len())
 }
 
 func TestRunVerboseRetryAndCapture(t *testing.T) {

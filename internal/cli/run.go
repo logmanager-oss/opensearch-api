@@ -74,9 +74,23 @@ func runRun(cmd *cobra.Command, rf *runFlags, path string) error {
 		return nil
 	}
 
-	cfg, err := resolveConnection(cmd, &rf.connFlags, env)
+	var creds runbook.Credentials
+	if rb.Credentials != nil {
+		creds, err = rb.Credentials.Resolve(env)
+		if err != nil {
+			return fmt.Errorf("resolving runbook credentials: %w", err)
+		}
+	}
+
+	cfg, err := resolveConnection(cmd, &rf.connFlags, env, rb.Credentials == nil)
 	if err != nil {
 		return err
+	}
+
+	// Folded into cfg rather than carried alongside it: anything reading
+	// cfg.Username later must see the identity that actually authenticates.
+	if rb.Credentials != nil {
+		cfg.Username, cfg.Password = creds.Username, creds.Password
 	}
 
 	client, err := osclient.New(osclient.Options{
@@ -137,7 +151,9 @@ func loadEnv(envFile string) (config.EnvLookup, error) {
 // resolveConnection resolves cf against env and flag precedence, then
 // resolves the password, prompting only on a TTY. It mirrors resolveConfig
 // (request.go) minus the retry/predicate parts, which run lacks flags for.
-func resolveConnection(cmd *cobra.Command, cf *connFlags, env config.EnvLookup) (config.Config, error) {
+// needPassword is false when the runbook supplies credentials: no password
+// prompt, no requirement.
+func resolveConnection(cmd *cobra.Command, cf *connFlags, env config.EnvLookup, needPassword bool) (config.Config, error) {
 	flags := config.Config{
 		Endpoint:   cf.endpoint,
 		Username:   cf.username,
@@ -152,6 +168,9 @@ func resolveConnection(cmd *cobra.Command, cf *connFlags, env config.EnvLookup) 
 	})
 	if err != nil {
 		return config.Config{}, err
+	}
+	if !needPassword {
+		return cfg, nil
 	}
 
 	pw, err := config.ResolvePassword(cfg, config.TerminalPrompt(cfg.Username), isTerminal(cmd.InOrStdin()))
@@ -168,6 +187,9 @@ func resolveConnection(cmd *cobra.Command, cf *connFlags, env config.EnvLookup) 
 // can't disagree.
 func printPlan(w io.Writer, rb *runbook.Runbook) {
 	_, _ = fmt.Fprintf(w, "dry-run: %d call(s), no requests sent\n", len(rb.Calls))
+	if rb.Credentials != nil {
+		_, _ = fmt.Fprintln(w, "  credentials: defined by runbook (overrides -u/--password and OPENSEARCH_USERNAME/PASSWORD)")
+	}
 	for i := range rb.Calls {
 		c := &rb.Calls[i]
 		line := fmt.Sprintf("  %d. %s: %s %s", i+1, c.Name, c.Method, c.Path)

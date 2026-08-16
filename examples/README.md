@@ -10,6 +10,7 @@ feature it shows.
 | [`optimistic-update.yaml`](optimistic-update.yaml) | capture `_seq_no`/`_primary_term`, wait for them with `success-when` + retry, use them as query values |
 | [`wait-for-green.yaml`](wait-for-green.yaml) | gate an action on cluster health — the runbook replacement for a `sleep` |
 | [`ism-policy.yaml`](ism-policy.yaml) | `defaults:` layering, including a `retry: 0` override of an inherited `retry: 3` |
+| [`with-credentials.yaml`](with-credentials.yaml) | `defaults: credentials:` — authenticate with a runbook-defined username and password |
 
 Validate a file without sending anything (needs no endpoint or credentials):
 
