@@ -75,6 +75,11 @@ file):
 Values in an `--env-file` take precedence over the process environment, so a
 file can override whatever is exported in the shell.
 
+For `osapi run`, a runbook's `defaults: credentials:` block overrides the
+resolved username and password. Such a run never prompts for a password. The
+block does not affect the endpoint or the TLS settings. See
+[Run files: `credentials:`](runbooks.md#credentials).
+
 ## Credentials and TLS
 
 Prefer `OPENSEARCH_PASSWORD`, an `--env-file`, or the interactive masked

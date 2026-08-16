@@ -84,6 +84,10 @@ mapping applied to every call before its own keys are read.
 | `continue-on-failure`  |          | do not halt the run if this call fails; the failure is reported as tolerated |
 | `max-body-buffer`      |          | max body buffered for predicate/capture evaluation (`0` = unlimited) |
 
+`credentials` is not in this table. It is a `defaults:`-only key, described in
+[`credentials:`](#credentials) below. A per-call `credentials:` key is a load
+error.
+
 Retry classification (`retry-when`, `success-when`, `abort-on`) works exactly
 as for a single request — see [Retry and classification](retry.md).
 
@@ -134,6 +138,50 @@ a call inherits:
        headers:
          Content-Type: application/x-ndjson   # wins; only one header is sent
    ```
+
+## `credentials:`
+
+`defaults:` accepts an optional `credentials:` block that sets the username
+and password for every call in the runbook. A per-call `credentials:` key is
+a load error: identity is a runbook-wide setting, not a per-call one.
+
+```yaml
+defaults:
+  credentials:
+    username: admin
+    password: '${secret:OS_PASSWORD}'
+```
+
+The block takes exactly two keys, and both are required:
+
+- `username`
+- `password`
+
+Neither value may be empty. Each one is a literal string, or it holds one or
+more `${secret:NAME}` references. A reference resolves from the process
+environment, layered with `--env-file` the same way as any other setting —
+see [Configuration precedence](cli.md#configuration-precedence). An unset or
+empty variable is a run-time error naming the variable.
+
+The `secret:` prefix is reserved for this block. Every field that takes
+`${...}` substitution rejects it:
+
+- `${secret:NAME}` in a call's `path`, `query`, `headers`, or `body` is a load
+  error.
+- The same reference in a `defaults:` `query`, `headers`, or `body` is a load
+  error too, even when every call overrides that value.
+
+Standard scanner escaping applies: write a literal `${` as `$${`. So
+`password: '$${secret:PW}'` sets a literal password, not a reference, and no
+warning fires for it. Prefer `${secret:NAME}` for a runbook kept in version
+control.
+
+When `credentials:` is set, it overrides `-u`/`--password`,
+`OPENSEARCH_USERNAME`, and `OPENSEARCH_PASSWORD` for every call in the
+runbook. A live run applies the override silently, with no warning printed.
+
+See [`examples/with-credentials.yaml`](../examples/with-credentials.yaml) for
+a runnable example.
 
 ## Execution model
 
@@ -252,6 +300,14 @@ dry-run: 6 call(s), no requests sent
      retry: 3 (exponential)
 ```
 
+`--dry-run` never resolves `${secret:NAME}` references. It succeeds even when
+the named variables are unset. When a runbook sets `defaults: credentials:`,
+the plan prints this line after the header, with no values shown:
+
+```
+  credentials: defined by runbook (overrides -u/--password and OPENSEARCH_USERNAME/PASSWORD)
+```
+
 Headers are deliberately omitted from the plan. Printing them would put an
 `Authorization` value into stderr and CI logs.
 
@@ -272,6 +328,11 @@ Connection settings (`--endpoint`, `-u`, `--password`, `--ca-cert`,
 has no `--retry`/`--backoff` flags, and passing one is an "unknown flag"
 error.
 
+A runbook's `defaults: credentials:` block overrides the username and the
+password for that runbook's calls. It leaves `--endpoint`, `--ca-cert`, and
+`-k` untouched. A live run applies the override silently, with no warning
+printed. See [`credentials:`](#credentials) above.
+
 A call's `@file` body resolves relative to the runbook file's own directory
 (an absolute path is used as given). A runbook and its payload files move
 together as a unit, regardless of the working directory `osapi run` is
@@ -285,7 +346,7 @@ the subcommand.
 ## Not yet supported
 
 - a per-call `timeout:`
-- per-call identity (`credentials:`/`as:`)
+- per-call identity (`as:`)
 - general variable substitution beyond captures
 - a stdin body
 - `--output` for saving response bodies
