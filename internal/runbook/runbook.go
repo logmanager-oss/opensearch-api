@@ -92,9 +92,10 @@ type capDecl struct {
 }
 
 // Runbook stays a struct rather than a bare []Call so a future top-level key
-// (credentials:, vars:) is an added field, not a signature change.
+// (vars:) is an added field, not a signature change.
 type Runbook struct {
-	Calls []Call // document order; all of them run
+	Calls       []Call       // document order. All run
+	Credentials *Credentials // defaults: credentials:, or nil when absent
 }
 
 // callSpec is the YAML decode target for a call or the defaults block.
@@ -141,7 +142,7 @@ func Load(r io.Reader, baseDir string) (*Runbook, error) {
 		return nil, err
 	}
 
-	defaultsSpec, err := loadDefaults(&doc.Defaults, baseDir)
+	defaultsSpec, creds, err := loadDefaults(&doc.Defaults, baseDir)
 	if err != nil {
 		return nil, err
 	}
@@ -173,7 +174,7 @@ func Load(r io.Reader, baseDir string) (*Runbook, error) {
 		calls[i] = call
 	}
 
-	return &Runbook{Calls: calls}, nil
+	return &Runbook{Calls: calls, Credentials: creds}, nil
 }
 
 // loader carries the state Load threads through every call: baseDir and
@@ -241,14 +242,16 @@ var callAllowedKeys = map[string]bool{
 	"capture": true, "continue-on-failure": true, "max-body-buffer": true,
 }
 
-// defaultsAllowedKeys are callAllowedKeys minus name, path and capture: a
-// default applies to every call, so a per-call identity/capture key makes no
-// sense there.
+// defaultsAllowedKeys is callAllowedKeys minus name, path and capture: a
+// default applies to every call, so a per-call identity/capture key makes
+// no sense there. It also adds credentials, a defaults-only key: a
+// per-call credentials: key is rejected by callAllowedKeys instead.
 var defaultsAllowedKeys = func() map[string]bool {
 	m := maps.Clone(callAllowedKeys)
 	delete(m, "name")
 	delete(m, "path")
 	delete(m, "capture")
+	m["credentials"] = true
 	return m
 }()
 
@@ -259,47 +262,52 @@ var defaultsAllowedKeys = func() map[string]bool {
 // could be misattributed to a call, or escape validation entirely when every
 // call overrode it. A missing defaults: yields the zero callSpec (no
 // defaults).
-func loadDefaults(node *yaml.Node, baseDir string) (callSpec, error) {
+func loadDefaults(node *yaml.Node, baseDir string) (callSpec, *Credentials, error) {
 	if node.Kind == 0 {
-		return callSpec{}, nil
+		return callSpec{}, nil, nil
 	}
 
 	ref := fmt.Sprintf("defaults (line %d)", node.Line)
 	if node.Kind != yaml.MappingNode {
-		return callSpec{}, fmt.Errorf("%s: must be a mapping", ref)
+		return callSpec{}, nil, fmt.Errorf("%s: must be a mapping", ref)
 	}
 	if err := checkAllowedKeys(node, defaultsAllowedKeys, ref); err != nil {
-		return callSpec{}, err
+		return callSpec{}, nil, err
+	}
+
+	creds, err := parseCredentials(rawNodeField(node, "credentials"), ref)
+	if err != nil {
+		return callSpec{}, nil, err
 	}
 
 	var spec callSpec
 	if err := node.Decode(&spec); err != nil {
-		return callSpec{}, fmt.Errorf("%s: %w", ref, err)
+		return callSpec{}, nil, fmt.Errorf("%s: %w", ref, err)
 	}
 
 	if err := validateMethod(spec.Method); err != nil {
-		return callSpec{}, fmt.Errorf("%s: %w", ref, err)
+		return callSpec{}, nil, fmt.Errorf("%s: %w", ref, err)
 	}
 	if _, err := buildRetryConfig(&spec); err != nil {
-		return callSpec{}, fmt.Errorf("%s: %w", ref, err)
+		return callSpec{}, nil, fmt.Errorf("%s: %w", ref, err)
 	}
 	if _, err := retry.CompilePredicate(spec.RetryWhen); err != nil {
-		return callSpec{}, fmt.Errorf("%s: retry-when: %w", ref, err)
+		return callSpec{}, nil, fmt.Errorf("%s: retry-when: %w", ref, err)
 	}
 	if _, err := retry.CompilePredicate(spec.SuccessWhen); err != nil {
-		return callSpec{}, fmt.Errorf("%s: success-when: %w", ref, err)
+		return callSpec{}, nil, fmt.Errorf("%s: success-when: %w", ref, err)
 	}
 	bodyArg, err := resolveBodyArg(spec.Body, baseDir)
 	if err != nil {
-		return callSpec{}, fmt.Errorf("%s: %w", ref, err)
+		return callSpec{}, nil, fmt.Errorf("%s: %w", ref, err)
 	}
 	// nil stdin: same reasoning as loadCall. A runbook has no stdin of its
 	// own, so "@-" in defaults is rejected the same as per-call.
 	if _, _, err := osclient.ReadBody(bodyArg, nil); err != nil {
-		return callSpec{}, fmt.Errorf("%s: reading body: %w", ref, err)
+		return callSpec{}, nil, fmt.Errorf("%s: reading body: %w", ref, err)
 	}
 
-	return spec, nil
+	return spec, creds, nil
 }
 
 func validateCallsShape(calls *yaml.Node) error {

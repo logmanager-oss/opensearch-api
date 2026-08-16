@@ -361,8 +361,22 @@ func TestLoadTopLevelSchemaErrors(t *testing.T) {
 		{
 			name: "unknown top-level key",
 			src: `
+vars:
+  x: 1
+calls:
+  - name: c
+    path: /x
+`,
+			wantErrMsg: []string{"vars"},
+		},
+		{
+			// credentials: belongs under defaults:, not at the top level.
+			// KnownFields rejects it here the same as any other unknown key.
+			name: "top-level credentials key",
+			src: `
 credentials:
-  user: admin
+  username: admin
+  password: secret
 calls:
   - name: c
     path: /x
@@ -510,7 +524,7 @@ calls:
     headers:
       Content-Type: application/x-ndjson
 `
-	for i := 0; i < 200; i++ {
+	for i := range 200 {
 		rb, err := Load(strings.NewReader(src), "")
 		require.NoError(t, err)
 		require.Len(t, rb.Calls, 1)
