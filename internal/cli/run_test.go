@@ -355,12 +355,19 @@ calls:
     path: /x
 `)
 
-	_, _, err := run(t, nil, "run", path, "--endpoint", srv.URL,
+	_, stderr, err := run(t, nil, "run", path, "--endpoint", srv.URL,
 		"-u", "other", "--password", "otherpass")
 	require.NoError(t, err)
 	require.Equal(t, 1, rec.len())
 	assert.Equal(t, "rb_user", rec.at(0).user)
 	assert.Equal(t, "rb_pass", rec.at(0).pass)
+
+	// A live run overrides silently by design, and no identity reaches
+	// stderr. Only the dry-run plan announces the block.
+	assert.NotContains(t, stderr, "credentials")
+	for _, v := range []string{"rb_user", "rb_pass", "other", "otherpass"} {
+		assert.NotContains(t, stderr, v)
+	}
 }
 
 // Runbook credentials must also beat OPENSEARCH_USERNAME/PASSWORD: the env

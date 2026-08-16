@@ -152,6 +152,22 @@ calls:
 			wantErrMsg: []string{`"password" must not be empty`},
 		},
 		{
+			// parseCredentials bypasses node.Decode, so it must reject a
+			// repeated key itself instead of letting the first one win.
+			name: "duplicate key",
+			src: `
+defaults:
+  credentials:
+    username: admin
+    password: stale
+    password: current
+calls:
+  - name: c
+    path: /x
+`,
+			wantErrMsg: []string{`duplicate key "password"`},
+		},
+		{
 			name: "non-scalar value",
 			src: `
 defaults:

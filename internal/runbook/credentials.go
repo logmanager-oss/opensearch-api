@@ -64,6 +64,9 @@ func parseCredentials(node *yaml.Node, ref string) (*Credentials, error) {
 	if err := checkAllowedKeys(node, credentialsAllowedKeys, credRef); err != nil {
 		return nil, err
 	}
+	if err := rejectDuplicateCredentialKeys(node, credRef); err != nil {
+		return nil, err
+	}
 
 	username, err := credentialValue(node, credRef, "username")
 	if err != nil {
@@ -95,6 +98,22 @@ func (c *Credentials) Resolve(lookup config.EnvLookup) (Credentials, error) {
 		return Credentials{}, err
 	}
 	return Credentials{Username: username, Password: password}, nil
+}
+
+// rejectDuplicateCredentialKeys fails a repeated key in the block. Every
+// other mapping inherits this from yaml.v3's decoder, which parseCredentials
+// bypasses, so without it a stale "password:" line above a new one would win
+// silently.
+func rejectDuplicateCredentialKeys(node *yaml.Node, ref string) error {
+	seen := make(map[string]bool, len(node.Content)/2)
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		key := node.Content[i].Value
+		if seen[key] {
+			return fmt.Errorf("%s: duplicate key %q at line %d", ref, key, node.Content[i].Line)
+		}
+		seen[key] = true
+	}
+	return nil
 }
 
 // credentialValue reads one required credential scalar straight from the
