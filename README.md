@@ -37,10 +37,10 @@ Release archives are signed with cosign (keyless) and carry a SLSA provenance at
 Each archive also ships an SPDX SBOM (`<archive>.sbom.json`).
 
 ```sh
-A=osapi_${VERSION}_linux_amd64.tar.gz   # VERSION: the release you downloaded, e.g. 1.2.0
+A=opensearch-api_${VERSION}_linux_amd64.tar.gz   # VERSION: the release you downloaded, e.g. 1.2.0
 gh attestation verify "$A" --repo logmanager-oss/opensearch-api \
   --signer-workflow logmanager-oss/opensearch-api/.github/workflows/build-release.yml
-cosign verify-blob "$A" --bundle "$A.bundle" \
+cosign verify-blob "$A" --bundle "$A.sigstore.json" \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   --certificate-identity-regexp '^https://github.com/logmanager-oss/opensearch-api/\.github/workflows/build-release\.yml@refs/tags/v'
 ```
