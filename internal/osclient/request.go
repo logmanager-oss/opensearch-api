@@ -134,8 +134,10 @@ func stripUserinfo(raw string) string {
 	}
 	rest := raw[i+3:]
 	at := strings.IndexByte(rest, '@')
-	slash := strings.IndexByte(rest, '/')
-	if at < 0 || (slash >= 0 && at > slash) {
+	// The authority ends at the first "/", "?" or "#": an "@" after that is
+	// path, query or fragment, not userinfo.
+	end := strings.IndexAny(rest, "/?#")
+	if at < 0 || (end >= 0 && at > end) {
 		return raw
 	}
 	return raw[:i+3] + rest[at+1:]
