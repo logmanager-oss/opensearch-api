@@ -24,4 +24,4 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+      - run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...  # Dependabot does not track this; bump by hand

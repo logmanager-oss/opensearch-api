@@ -23,5 +23,7 @@ Include the affected version, the steps to reproduce, and the impact you see.
 ## Release integrity
 
 Every release is built by GitHub Actions. The archives and the checksums file are signed with
-cosign (keyless, Sigstore) and carry a SLSA provenance attestation. Verify a download with
-`gh attestation verify --repo logmanager-oss/opensearch-api <archive>`.
+cosign (keyless, Sigstore) and carry a SLSA provenance attestation. Verify a download with the
+commands under "Verify a release download" in [README.md](README.md). Both commands pin the
+builder workflow. A check with `--repo` alone accepts an attestation from any workflow in the
+repository.

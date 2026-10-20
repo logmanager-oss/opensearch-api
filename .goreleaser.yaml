@@ -1,9 +1,5 @@
 version: 2
 
-before:
-  hooks:
-    - go mod tidy
-
 builds:
   - id: osapi
     main: ./cmd/osapi
@@ -27,6 +23,11 @@ archives:
 
 checksum:
   name_template: "checksums.txt"
+
+# Stay a draft until the release workflow has attached the cosign bundles and the provenance
+# attestation. The workflow publishes as its last step.
+release:
+  draft: true
 
 # One SPDX JSON SBOM per archive, produced by syft (installed in the release workflow).
 sboms:
