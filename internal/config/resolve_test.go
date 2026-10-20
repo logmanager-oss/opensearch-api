@@ -22,7 +22,9 @@ func changedSet(fields ...string) func(string) bool {
 func TestResolveDefaults(t *testing.T) {
 	got, err := Resolve(Sources{})
 	require.NoError(t, err)
-	assert.Equal(t, Defaults(), got)
+	want := Defaults()
+	want.Endpoint = DefaultEndpoint
+	assert.Equal(t, want, got)
 }
 
 func TestResolveEndpointPrecedence(t *testing.T) {
@@ -50,7 +52,15 @@ func TestResolveEndpointPrecedence(t *testing.T) {
 		{
 			name:    "default when nothing set",
 			sources: Sources{},
-			want:    "",
+			want:    DefaultEndpoint,
+		},
+		{
+			name: "empty flag falls back to default",
+			sources: Sources{
+				Flags:   Config{Endpoint: ""},
+				Changed: changedSet(FieldEndpoint),
+			},
+			want: DefaultEndpoint,
 		},
 	}
 	for _, tt := range tests {
@@ -195,7 +205,7 @@ func TestResolveEmptyEnvTreatedAsUnset(t *testing.T) {
 
 	got, err := Resolve(Sources{Env: env})
 	require.NoError(t, err)
-	assert.Empty(t, got.Endpoint)
+	assert.Equal(t, DefaultEndpoint, got.Endpoint)
 	assert.Empty(t, got.Username)
 	assert.Empty(t, got.Password)
 }
@@ -203,7 +213,9 @@ func TestResolveEmptyEnvTreatedAsUnset(t *testing.T) {
 func TestResolveNilEnv(t *testing.T) {
 	got, err := Resolve(Sources{Env: nil})
 	require.NoError(t, err)
-	assert.Equal(t, Defaults(), got)
+	want := Defaults()
+	want.Endpoint = DefaultEndpoint
+	assert.Equal(t, want, got)
 }
 
 func TestResolveInsecureAndCACert(t *testing.T) {

@@ -120,6 +120,10 @@ const (
 // default, so the two representations can never drift apart.
 const DefaultMaxBodyBuffer = "10MiB"
 
+// DefaultEndpoint is where a local OpenSearch usually listens. Resolve falls
+// back to it only when neither the flag nor OPENSEARCH_URL set an endpoint.
+const DefaultEndpoint = "https://localhost:9200"
+
 // Defaults returns the baseline configuration before any overrides.
 func Defaults() Config {
 	maxBodyBuffer, err := ParseSize(DefaultMaxBodyBuffer)

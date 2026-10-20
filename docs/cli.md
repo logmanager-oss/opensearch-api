@@ -19,7 +19,7 @@ subcommand.
 
 | Flag             | Default | Description                                                      |
 | ---------------- | ------- | ---------------------------------------------------------------- |
-| `--endpoint`     |         | OpenSearch endpoint URL, e.g. `https://localhost:9200`           |
+| `--endpoint`     | `https://localhost:9200` | OpenSearch endpoint URL                                 |
 | `-u, --username` |         | username for basic authentication                                |
 | `--password`     |         | password for basic authentication (see [Credentials and TLS](#credentials-and-tls)) |
 | `--ca-cert`      |         | path to a CA certificate bundle (PEM) used to verify TLS         |
