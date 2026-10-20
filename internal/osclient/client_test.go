@@ -39,11 +39,13 @@ func TestNew_InsecureConnectsToTLSServer(t *testing.T) {
 	}))
 	defer srv.Close()
 
+	var warn bytes.Buffer
 	client, err := New(Options{
 		Endpoint: srv.URL,
 		Username: testUser,
 		Password: "s3cret",
 		Insecure: true,
+		Warn:     &warn,
 	})
 	require.NoError(t, err)
 
@@ -53,6 +55,18 @@ func TestNew_InsecureConnectsToTLSServer(t *testing.T) {
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	assert.Equal(t, testUser, gotAuthUser)
 	assert.Equal(t, userAgent, gotUserAgent)
+	assert.Contains(t, warn.String(), "skipping TLS verification")
+}
+
+func TestNew_TransportHasTimeoutsAndProxy(t *testing.T) {
+	client, err := New(Options{Endpoint: "https://localhost:9200"})
+	require.NoError(t, err)
+
+	base, ok := client.Transport.(*authTransport).base.(*http.Transport)
+	require.True(t, ok)
+	assert.NotNil(t, base.Proxy, "proxy environment variables must be honoured")
+	assert.Positive(t, base.TLSHandshakeTimeout)
+	assert.NotNil(t, base.DialContext, "dialer with a timeout expected")
 }
 
 func TestNew_ValidCASucceeds(t *testing.T) {
