@@ -33,7 +33,7 @@ build it first via `make build`.
 
 Overrides:
 
-- `E2E_OPENSEARCH_IMAGE` - OpenSearch image to run (default `opensearchproject/opensearch:2.19.4`)
+- `E2E_OPENSEARCH_IMAGE` - OpenSearch image to run (default `opensearchproject/opensearch:2.19.4`, pinned by digest in `docker-compose.yml`)
 - `E2E_OPENSEARCH_PORT` - host port the cluster is published on (default `19200`)
 
 ## Credentials
