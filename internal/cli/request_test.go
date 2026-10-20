@@ -151,6 +151,7 @@ func TestRequestDefaultSingleAttempt(t *testing.T) {
 		"--endpoint", srv.URL, "--path", "x",
 	)
 	require.Error(t, err)
+	assert.ErrorIs(t, err, retry.ErrStatusRejected)
 	assert.Equal(t, 1, rec.len(), "no --retry means exactly one attempt")
 	assert.Equal(t, "body-503", stdout, "the failing body is still printed")
 }

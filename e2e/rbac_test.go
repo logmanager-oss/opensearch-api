@@ -58,7 +58,7 @@ func TestRBAC_ReaderForbiddenWrite(t *testing.T) {
 	require.Equal(t, 1, res.exitCode)
 	assert.Contains(t, res.stdout, "security_exception")
 	assert.Contains(t, res.stdout, "403")
-	assert.Contains(t, res.stderr, "retries exhausted")
+	assert.Contains(t, res.stderr, "status 403 rejected")
 }
 
 func TestRBAC_LockedUserForbiddenEverywhere(t *testing.T) {

@@ -21,7 +21,7 @@ func TestAuth_WrongPassword(t *testing.T) {
 	require.Equal(t, 1, res.exitCode)
 	// The security plugin's 401 body is plain text, not JSON.
 	assert.Contains(t, res.stdout, "Unauthorized")
-	assert.Contains(t, res.stderr, "retries exhausted")
+	assert.Contains(t, res.stderr, "status 401 rejected")
 }
 
 func TestAuth_NoCredentials(t *testing.T) {

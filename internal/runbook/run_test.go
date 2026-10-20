@@ -882,8 +882,7 @@ calls:
 `)
 
 	require.Error(t, err)
-	assert.Contains(t, out, `call "truncated": failed (retries exhausted`)
-	assert.Contains(t, out, "reading response body")
+	assert.Contains(t, out, `call "truncated": failed (reading response body`)
 	assert.NotContains(t, out, "transport error")
 }
 
