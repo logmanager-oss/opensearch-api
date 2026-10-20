@@ -58,6 +58,9 @@ func Resolve(s Sources) (Config, error) {
 		return Config{}, fmt.Errorf("invalid timeout %s: must not be negative", cfg.Timeout)
 	}
 	resolvePasswordSource(&cfg, &s)
+	if cfg.Endpoint == "" {
+		cfg.Endpoint = DefaultEndpoint
+	}
 
 	return cfg, nil
 }

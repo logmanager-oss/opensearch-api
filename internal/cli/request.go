@@ -39,8 +39,8 @@ type connFlags struct {
 // or the leading flags fail to parse.
 func registerConnFlags(cmd *cobra.Command, c *connFlags) {
 	f := cmd.Flags()
-	f.StringVar(&c.endpoint, config.FieldEndpoint, "",
-		"OpenSearch endpoint URL (e.g. https://localhost:9200)")
+	f.StringVar(&c.endpoint, config.FieldEndpoint, config.DefaultEndpoint,
+		"OpenSearch endpoint URL")
 	f.StringVarP(&c.username, config.FieldUsername, "u", "",
 		"username for basic authentication")
 	f.StringVar(&c.password, config.FieldPassword, "",
