@@ -406,6 +406,40 @@ calls:
 	assert.ErrorIs(t, err, context.Canceled)
 	assert.Equal(t, []string{"/first", "/wait_green"}, rec.paths())
 	assert.Contains(t, stderr.String(), `run: 1 succeeded, interrupted during call "wait_green", 2 not run`)
+	assert.NotContains(t, stderr.String(), "timed out")
+}
+
+func TestRunDeadlineSummarySaysTimedOut(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/hang", func(_ http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	})
+	mux.HandleFunc("/never", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	rb, err := Load(strings.NewReader(`
+calls:
+  - name: hang
+    path: /hang
+  - name: never
+    path: /never
+`), "")
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	t.Cleanup(cancel)
+
+	var stderr bytes.Buffer
+	runner := &Runner{Client: http.DefaultClient, Endpoint: srv.URL, Stderr: &stderr}
+	err = runner.Run(ctx, rb)
+
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	out := stderr.String()
+	assert.Contains(t, out, `run: 0 succeeded, timed out during call "hang", 1 not run`)
+	assert.NotContains(t, out, "interrupted")
 }
 
 func TestRunRequestDetailsReachServer(t *testing.T) {
@@ -800,6 +834,7 @@ calls:
 	assert.Contains(t, out, `call "slow": failed (transport error,`)
 	assert.Contains(t, out, "run: 0 succeeded, 1 failed (halted), 0 not run")
 	assert.NotContains(t, out, "interrupted")
+	assert.NotContains(t, out, "timed out")
 }
 
 // The echoed body is untrusted: a bare CR or an ANSI escape would let the
