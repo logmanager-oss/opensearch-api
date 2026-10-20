@@ -43,7 +43,7 @@ func ResolvePassword(cfg Config, prompt func() (string, error), isTTY bool) (str
 func TerminalPrompt(user string) func() (string, error) {
 	return func() (string, error) {
 		fmt.Fprintf(os.Stderr, "Password for %q: ", user)
-		b, err := term.ReadPassword(int(os.Stdin.Fd()))
+		b, err := term.ReadPassword(int(os.Stdin.Fd())) //nolint:gosec // G115: a stdin fd fits int on every supported platform
 		fmt.Fprintln(os.Stderr)
 		if err != nil {
 			return "", fmt.Errorf("reading masked password: %w", err)

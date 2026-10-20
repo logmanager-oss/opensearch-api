@@ -154,3 +154,20 @@ func TestFormatSize(t *testing.T) {
 		})
 	}
 }
+
+// FuzzParseSize checks the documented contract: a parsed size formats back to
+// a string that parses to the same value.
+func FuzzParseSize(f *testing.F) {
+	for _, seed := range []string{"512", "0", "512B", "10KiB", "10MiB", "2GiB", "10KB", "10mib", "", "1.5MiB", "-1", "9223372036854775807B"} {
+		f.Add(seed)
+	}
+	f.Fuzz(func(t *testing.T, s string) {
+		n, err := ParseSize(s)
+		if err != nil {
+			return
+		}
+		back, err := ParseSize(FormatSize(n))
+		require.NoError(t, err, "FormatSize(%d) = %q does not parse", n, FormatSize(n))
+		assert.Equal(t, n, back)
+	})
+}

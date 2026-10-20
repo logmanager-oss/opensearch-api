@@ -3,6 +3,7 @@ package osclient
 import (
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -224,4 +225,35 @@ func TestBuildRequest_GetBodyReplaysFreshReader(t *testing.T) {
 	bodyData, err := io.ReadAll(req.Body)
 	require.NoError(t, err)
 	assert.Equal(t, payload, string(bodyData))
+}
+
+// FuzzBuildRequest checks that a --path value can never move the request to
+// another host: the built URL keeps the endpoint's scheme and host.
+func FuzzBuildRequest(f *testing.F) {
+	seeds := [][2]string{
+		{"http://localhost:9200", "_cluster/health"},
+		{"http://localhost:9200/", "/_cluster/health"},
+		{"https://os.example:9200", "_search?scroll=1m"},
+		{"https://os.example:9200", "//evil.example/_search"},
+		{"https://os.example:9200", "@evil.example/_search"},
+		{"https://os.example:9200", "../_search"},
+		{"https://user:pass@os.example:9200", "_search"},
+	}
+	for _, s := range seeds {
+		f.Add(s[0], s[1])
+	}
+	f.Fuzz(func(t *testing.T, endpoint, path string) {
+		// Only endpoints with a plain hostname are in scope: url.Parse accepts
+		// garbage like "A://::" whose host no later parse reproduces.
+		base, err := url.Parse(endpoint)
+		if err != nil || base.Scheme == "" || base.Hostname() == "" || strings.ContainsAny(base.Hostname(), ":[]") {
+			return
+		}
+		req, err := BuildRequest(endpoint, RequestSpec{Method: http.MethodGet, Path: path})
+		if err != nil {
+			return
+		}
+		assert.Equal(t, base.Scheme, req.URL.Scheme)
+		assert.Equal(t, base.Hostname(), req.URL.Hostname(), "path %q moved the request off the endpoint host", path)
+	})
 }

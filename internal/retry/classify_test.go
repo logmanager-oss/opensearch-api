@@ -245,3 +245,23 @@ func TestClassifyNoPredicatesConfigured(t *testing.T) {
 	assert.Equal(t, Retry, got)
 	assert.Empty(t, reason)
 }
+
+// FuzzClassify runs both body predicates over arbitrary bodies and statuses.
+// The decode and jq evaluation path must never panic and must always return
+// one of the three outcomes.
+func FuzzClassify(f *testing.F) {
+	for _, seed := range []string{`{"status":"green"}`, `{"status":"red","error":{}}`, `{"error":null}`, `[]`, `null`, `"text"`, `{`, ``, `{"status":1e999}`} {
+		f.Add([]byte(seed), 200)
+		f.Add([]byte(seed), 503)
+	}
+	retryWhen, err := CompilePredicate(`.error != null`)
+	require.NoError(f, err)
+	successWhen, err := CompilePredicate(`.status == "green"`)
+	require.NoError(f, err)
+	e := New(config.RetryConfig{AbortOn: []int{404}}, WithRetryWhen(retryWhen), WithSuccessWhen(successWhen))
+	f.Fuzz(func(t *testing.T, body []byte, status int) {
+		outcome, _, err := e.classify(context.Background(), status, body, false, nil)
+		require.NoError(t, err)
+		assert.Contains(t, []Outcome{Success, Retry, Terminal}, outcome)
+	})
+}

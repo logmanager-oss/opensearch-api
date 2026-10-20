@@ -1,6 +1,7 @@
 package runbook
 
 import (
+	"bytes"
 	"io"
 	"net/http"
 	"os"
@@ -899,4 +900,28 @@ func TestLoadDefaultsMethodToGet(t *testing.T) {
 	rb, err := Load(strings.NewReader("calls:\n  - name: c\n    path: /x\n"), "")
 	require.NoError(t, err)
 	assert.Equal(t, http.MethodGet, rb.Calls[0].Method)
+}
+
+// FuzzLoad feeds arbitrary YAML through the loader: yaml.Node walking,
+// capture parsing, reference checking and duplicate detection. Inputs with
+// "@" are skipped so no body file is read from disk.
+func FuzzLoad(f *testing.F) {
+	seeds := []string{
+		"calls:\n  - name: a\n    method: GET\n    path: /x\n",
+		"defaults:\n  retry: 3\ncalls:\n  - name: a\n    path: /x\n    capture:\n      id: .id\n  - name: b\n    path: /y/${id}\n",
+		"calls:\n  - name: a\n    path: /x\n  - name: a\n    path: /y\n",
+		"calls: {}\n",
+		"calls:\n  - name: a\n    path: /x\n    success-when: '.acknowledged'\n    max-body-buffer: 1MiB\n",
+		"",
+		"---\ncalls: []\n---\ncalls: []\n",
+	}
+	for _, s := range seeds {
+		f.Add([]byte(s))
+	}
+	f.Fuzz(func(t *testing.T, data []byte) {
+		if bytes.Contains(data, []byte("@")) {
+			t.Skip("a body: '@file' value would read from disk")
+		}
+		_, _ = Load(bytes.NewReader(data), "")
+	})
 }

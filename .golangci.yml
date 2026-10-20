@@ -11,6 +11,7 @@ linters:
     - bodyclose
     - errorlint
     - gocritic
+    - gosec
     - misspell
     - prealloc
     - revive
@@ -22,9 +23,19 @@ linters:
         - diagnostic
         - style
         - performance
+    gosec:
+      excludes:
+        - G117 # Password fields are inherent to a Basic-auth client; String/GoString redact them
+        - G304 # user-supplied file paths are the feature: --env-file, @body files, runbooks
+        - G704 # user-supplied endpoints are the feature: the tool is an HTTP client
     revive:
       rules:
         - name: early-return
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters:
+          - gosec # test fixtures: literal credentials, exec of the built binary, 0755 temp dirs
 
 formatters:
   enable:
