@@ -20,7 +20,8 @@ var (
 	ErrTerminalStatus = errors.New("terminal status")
 	// ErrRetriesExhausted is returned when the retry budget is exhausted.
 	ErrRetriesExhausted = errors.New("retries exhausted")
-	// ErrStatusRejected is returned when the single attempt fails and no retry is configured.
+	// ErrStatusRejected is returned when the single attempt gets a non-success
+	// response and no retry is configured. A transport error returns its cause.
 	ErrStatusRejected = errors.New("rejected")
 )
 
