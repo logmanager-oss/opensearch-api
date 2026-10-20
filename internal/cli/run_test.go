@@ -361,3 +361,30 @@ calls:
 	assert.Contains(t, stderr, "status_val=green")
 	assert.Equal(t, 3, rec.len())
 }
+
+func TestRunTimeout(t *testing.T) {
+	srv := newBlockingServer(t)
+	path := writeRunbook(t, t.TempDir(), `
+calls:
+  - name: hang
+    method: GET
+    path: /x
+`)
+
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{"flag after subcommand", []string{"run", path, "--endpoint", srv.URL, "--timeout", "50ms"}},
+		{"flag before subcommand", []string{"--timeout", "50ms", "run", path, "--endpoint", srv.URL}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, stderr, err := run(t, nil, tt.args...)
+			require.ErrorIs(t, err, ErrTimeout)
+			assert.True(t, IsReported(err))
+			assert.Contains(t, stderr, `timed out during call "hang"`)
+			assert.NotContains(t, stderr, "interrupted")
+		})
+	}
+}

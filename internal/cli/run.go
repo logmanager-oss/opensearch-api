@@ -1,12 +1,14 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -97,10 +99,34 @@ func runRun(cmd *cobra.Command, rf *runFlags, path string) error {
 		Stderr:   cmd.ErrOrStderr(),
 		Verbose:  rf.verbose,
 	}
-	if err := runner.Run(cmd.Context(), rb); err != nil {
-		return &reportedError{err: err}
+	ctx, cancel := withTimeout(cmd.Context(), cfg.Timeout)
+	defer cancel()
+	if err := runner.Run(ctx, rb); err != nil {
+		return &reportedError{err: timeoutError(ctx, cfg.Timeout, err)}
 	}
 	return nil
+}
+
+// ErrTimeout reports that --timeout elapsed before the invocation finished.
+// main maps it to exit code 124.
+var ErrTimeout = errors.New("timed out")
+
+// withTimeout bounds ctx by timeout. Zero or less adds no deadline.
+func withTimeout(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	if timeout <= 0 {
+		return context.WithCancel(ctx)
+	}
+	return context.WithTimeout(ctx, timeout)
+}
+
+// timeoutError returns ErrTimeout when ctx's own deadline caused err. It
+// checks both sides, like runbook.isContextErr: a deadline error from below
+// ctx with ctx still alive stays an ordinary failure.
+func timeoutError(ctx context.Context, timeout time.Duration, err error) error {
+	if err == nil || !errors.Is(ctx.Err(), context.DeadlineExceeded) || !errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	return fmt.Errorf("%w after %s", ErrTimeout, timeout)
 }
 
 // reportedError wraps a Runner.Run error: the Runner already wrote the
@@ -110,7 +136,7 @@ type reportedError struct{ err error }
 func (e *reportedError) Error() string { return e.err.Error() }
 
 // Unwrap keeps the cause visible: main maps context.Canceled to exit code
-// 130 via errors.Is.
+// 130 and ErrTimeout to 124 via errors.Is.
 func (e *reportedError) Unwrap() error { return e.err }
 
 // IsReported reports whether err was already written to stderr, so main
@@ -144,6 +170,7 @@ func resolveConnection(cmd *cobra.Command, cf *connFlags, env config.EnvLookup) 
 		Password:   cf.password,
 		CACertPath: cf.caCert,
 		Insecure:   cf.insecure,
+		Timeout:    cf.timeout,
 	}
 	cfg, err := config.Resolve(config.Sources{
 		Flags:   flags,
