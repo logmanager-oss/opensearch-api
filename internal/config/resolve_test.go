@@ -62,6 +62,95 @@ func TestResolveEndpointPrecedence(t *testing.T) {
 	}
 }
 
+func TestResolveTimeout(t *testing.T) {
+	env30 := mapLookup(map[string]string{"OSAPI_TIMEOUT": "30s"})
+
+	tests := []struct {
+		name    string
+		sources Sources
+		want    time.Duration
+	}{
+		{
+			name: "flag beats env",
+			sources: Sources{
+				Flags:   Config{Timeout: 5 * time.Second},
+				Changed: changedSet(FieldTimeout),
+				Env:     env30,
+			},
+			want: 5 * time.Second,
+		},
+		{
+			name:    "env beats default",
+			sources: Sources{Env: env30},
+			want:    30 * time.Second,
+		},
+		{
+			name:    "default when nothing set",
+			sources: Sources{},
+			want:    0,
+		},
+		{
+			name: "explicit zero flag beats env",
+			sources: Sources{
+				Flags:   Config{Timeout: 0},
+				Changed: changedSet(FieldTimeout),
+				Env:     env30,
+			},
+			want: 0,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := Resolve(tt.sources)
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got.Timeout)
+		})
+	}
+}
+
+func TestResolveTimeoutErrors(t *testing.T) {
+	tests := []struct {
+		name    string
+		sources Sources
+		wantErr string
+	}{
+		{
+			name:    "unparsable env without flag",
+			sources: Sources{Env: mapLookup(map[string]string{"OSAPI_TIMEOUT": "abc"})},
+			wantErr: "OSAPI_TIMEOUT",
+		},
+		{
+			name: "unparsable env is not rescued by flag",
+			sources: Sources{
+				Flags:   Config{Timeout: 5 * time.Second},
+				Changed: changedSet(FieldTimeout),
+				Env:     mapLookup(map[string]string{"OSAPI_TIMEOUT": "abc"}),
+			},
+			wantErr: "OSAPI_TIMEOUT",
+		},
+		{
+			name: "negative flag",
+			sources: Sources{
+				Flags:   Config{Timeout: -time.Second},
+				Changed: changedSet(FieldTimeout),
+			},
+			wantErr: "must not be negative",
+		},
+		{
+			name:    "negative env",
+			sources: Sources{Env: mapLookup(map[string]string{"OSAPI_TIMEOUT": "-1s"})},
+			wantErr: "must not be negative",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := Resolve(tt.sources)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
+}
+
 func TestResolveUsernameAndPassword(t *testing.T) {
 	env := mapLookup(map[string]string{
 		"OPENSEARCH_USERNAME": "envuser",
@@ -180,7 +269,8 @@ func TestResolveWithLayeredEnvFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), ".env")
 	require.NoError(t, os.WriteFile(path, []byte(
 		"OPENSEARCH_URL=https://file\n"+
-			"OPENSEARCH_PASSWORD=filepass\n"), 0o600))
+			"OPENSEARCH_PASSWORD=filepass\n"+
+			"OSAPI_TIMEOUT=7s\n"), 0o600))
 
 	fileVars, err := LoadEnvFile(path)
 	require.NoError(t, err)
@@ -196,4 +286,5 @@ func TestResolveWithLayeredEnvFile(t *testing.T) {
 	assert.Equal(t, "https://file", got.Endpoint) // file wins over process-env
 	assert.Equal(t, "processuser", got.Username)  // process-env fills the gap
 	assert.Equal(t, "filepass", got.Password)     // file-only value
+	assert.Equal(t, 7*time.Second, got.Timeout)
 }

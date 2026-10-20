@@ -82,6 +82,8 @@ type Config struct {
 	CACertPath string
 	Insecure   bool
 	Retry      RetryConfig
+	// Timeout bounds the network phase of one invocation. Zero means no bound.
+	Timeout time.Duration
 }
 
 const redacted = "***"

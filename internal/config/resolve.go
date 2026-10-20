@@ -1,7 +1,9 @@
 package config
 
 import (
+	"fmt"
 	"slices"
+	"time"
 )
 
 // Field names identify flags that were explicitly set. The CLI layer wires
@@ -22,6 +24,7 @@ const (
 	FieldRetryWhen      = "retry-when"
 	FieldSuccessWhen    = "success-when"
 	FieldMaxBodyBuffer  = "max-body-buffer"
+	FieldTimeout        = "timeout"
 )
 
 // Sources bundles the inputs to Resolve, decoupled from cobra:
@@ -47,20 +50,33 @@ func (s *Sources) changed(field string) bool {
 func Resolve(s Sources) (Config, error) {
 	cfg := Defaults()
 
-	applyEnv(&cfg, s.Env)
+	if err := applyEnv(&cfg, s.Env); err != nil {
+		return Config{}, err
+	}
 	applyFlags(&cfg, &s)
+	if cfg.Timeout < 0 {
+		return Config{}, fmt.Errorf("invalid timeout %s: must not be negative", cfg.Timeout)
+	}
 	resolvePasswordSource(&cfg, &s)
 
 	return cfg, nil
 }
 
-func applyEnv(cfg *Config, env EnvLookup) {
+func applyEnv(cfg *Config, env EnvLookup) error {
 	if v, ok := envEndpoint(env); ok {
 		cfg.Endpoint = v
 	}
 	if v, ok := envUsername(env); ok {
 		cfg.Username = v
 	}
+	if v, ok := envTimeout(env); ok {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return fmt.Errorf("invalid OSAPI_TIMEOUT %q: %w", v, err)
+		}
+		cfg.Timeout = d
+	}
+	return nil
 }
 
 func applyFlags(cfg *Config, s *Sources) {
@@ -103,6 +119,9 @@ func applyFlags(cfg *Config, s *Sources) {
 	}
 	if s.changed(FieldMaxBodyBuffer) {
 		cfg.Retry.MaxBodyBuffer = f.Retry.MaxBodyBuffer
+	}
+	if s.changed(FieldTimeout) {
+		cfg.Timeout = f.Timeout
 	}
 }
 
