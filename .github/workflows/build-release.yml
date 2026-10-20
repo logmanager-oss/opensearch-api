@@ -5,7 +5,10 @@ name: Build release
 on:
   workflow_call:
 
-permissions: read-all
+# A called workflow may not ask for more than the caller grants. The caller job in
+# release.yml grants exactly the three scopes the job below requests, so nothing at
+# the workflow level.
+permissions: {}
 
 jobs:
   release:
