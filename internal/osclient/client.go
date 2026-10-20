@@ -73,7 +73,9 @@ func (o Options) GoString() string {
 // never logged.
 //
 // Notes: the client has no Timeout — cancellation is driven by the request
-// context (the retry engine owns it). Request bodies are buffered fully in
+// context (the retry engine owns it). The transport is a clone of
+// http.DefaultTransport, so dial and TLS-handshake timeouts and the
+// HTTP(S)_PROXY/NO_PROXY variables apply. Request bodies are buffered fully in
 // memory so they can be replayed on retry (see BuildRequest). Redirects are
 // followed, but Basic auth is only ever sent to the configured origin (scheme +
 // host + port), never to a redirect target on another origin.
@@ -99,8 +101,12 @@ func New(opts Options) (*http.Client, error) {
 		_, _ = fmt.Fprintln(opts.Warn, "warning: username set without a password; request will be sent unauthenticated")
 	}
 
+	// A bare http.Transport has no dial or handshake timeout and ignores proxy
+	// variables. The default transport carries both.
+	base := http.DefaultTransport.(*http.Transport).Clone() //nolint:forcetypeassert // stdlib guarantees the type
+	base.TLSClientConfig = tlsCfg
 	transport := &authTransport{
-		base:     &http.Transport{TLSClientConfig: tlsCfg},
+		base:     base,
 		username: opts.Username,
 		password: opts.Password,
 		origin:   origin,
@@ -135,10 +141,14 @@ func parseOrigin(endpoint string) (origin, error) {
 //
 //nolint:gocritic // hugeParam: Options mirrors New's documented value API.
 func buildTLSConfig(opts Options) (*tls.Config, error) {
-	if opts.Insecure {
-		if opts.CACertPath != "" && opts.Warn != nil {
-			_, _ = fmt.Fprintln(opts.Warn, "warning: --insecure set, ignoring CA cert and skipping TLS verification")
+	if opts.Insecure && opts.Warn != nil {
+		msg := "warning: --insecure set, skipping TLS verification"
+		if opts.CACertPath != "" {
+			msg = "warning: --insecure set, ignoring CA cert and skipping TLS verification"
 		}
+		_, _ = fmt.Fprintln(opts.Warn, msg)
+	}
+	if opts.Insecure {
 		return &tls.Config{
 			InsecureSkipVerify: true, //nolint:gosec // insecure verification explicitly requested
 			MinVersion:         tls.VersionTLS12,

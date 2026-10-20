@@ -93,8 +93,11 @@ the process list (`ps`) and your shell history.
   error messages. Prefer `-u`/`--password` anyway: userinfo can surface in
   transport errors from other layers.
 - `-k, --insecure` disables TLS certificate verification entirely — use it
-  only against hosts you trust. When both `-k` and `--ca-cert` are set, `-k`
-  wins and `osapi` prints a warning.
+  only against hosts you trust. `osapi` prints a warning whenever `-k` is set.
+  When both `-k` and `--ca-cert` are set, `-k` wins.
+- `HTTPS_PROXY`, `HTTP_PROXY` and `NO_PROXY` are honoured with the standard Go
+  semantics. Connection setup is bounded by the Go defaults (30s dial, 10s TLS
+  handshake). The response itself is bounded only by `--timeout`.
 - `--query` and `--header` values are sent as given and are **not** redacted
   in verbose output, so avoid placing secrets in them.
 

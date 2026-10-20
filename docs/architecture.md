@@ -127,8 +127,9 @@ Each entry: the decision, why, and where it lives.
   (`--timeout`), `130` on `context.Canceled` (Ctrl-C/SIGTERM), `1` otherwise.
   `internal/cli/run.go`, `cmd/osapi/main.go: exitCode`.
 - **The HTTP client has no `Timeout`.** Cancellation is driven by the request
-  context, which the signal handler, the retry engine and `--timeout` own.
-  `internal/osclient/client.go: New`.
+  context, which the signal handler, the retry engine and `--timeout` own. The
+  transport is a clone of `http.DefaultTransport`, so dial and TLS-handshake
+  timeouts and proxy environment variables apply. `internal/osclient/client.go: New`.
 
 ## Testing layout
 
