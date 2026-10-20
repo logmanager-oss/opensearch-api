@@ -31,6 +31,20 @@ go build -o osapi ./cmd/osapi   # local binary in the repo dir (or: make build)
 Shell completion needs `osapi` on your `PATH`, so prefer `go install`. Load it
 with `source <(osapi completion bash)` (or `zsh`, `fish`).
 
+### Verify a release download
+
+Release archives are signed with cosign (keyless) and carry a SLSA provenance attestation.
+Each archive also ships an SPDX SBOM (`<archive>.sbom.json`).
+
+```sh
+A=osapi_${VERSION}_linux_amd64.tar.gz   # VERSION: the release you downloaded, e.g. 1.2.0
+gh attestation verify "$A" --repo logmanager-oss/opensearch-api \
+  --signer-workflow logmanager-oss/opensearch-api/.github/workflows/build-release.yml
+cosign verify-blob "$A" --bundle "$A.bundle" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-identity-regexp '^https://github.com/logmanager-oss/opensearch-api/\.github/workflows/build-release\.yml@refs/tags/v'
+```
+
 ## Quickstart
 
 ```sh
