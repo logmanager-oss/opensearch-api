@@ -1,6 +1,6 @@
 module github.com/logmanager-oss/opensearch-api
 
-go 1.26.6
+go 1.26.9
 
 require (
 	github.com/itchyny/gojq v0.12.19
