@@ -24,6 +24,13 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      # The main ruleset (reviews, status checks) does not apply to tags. Refuse a tag whose
+      # commit never reached main, so the workflow identity signs only reviewed code.
+      - name: Tag must be on main
+        run: |
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
         with:
           go-version-file: go.mod
