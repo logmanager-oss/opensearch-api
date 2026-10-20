@@ -62,7 +62,7 @@ sequenceDiagram
     retry-->>cli: final response (body open)
     cli->>cli: stream body to stdout
     cli-->>main: error or nil
-    main->>main: exit code 0 / 1 / 130
+    main->>main: exit code 0 / 1 / 124 / 130
 ```
 
 ## Runbook flow
@@ -123,11 +123,11 @@ Each entry: the decision, why, and where it lives.
   refresh workflow (below). `internal/apispec`.
 - **Errors are returned, not printed** — except `reportedError`, which marks
   an error the runbook Runner already wrote to stderr, so `main` does not
-  print it twice. Exit codes: `0` success, `130` on `context.Canceled`
-  (Ctrl-C/SIGTERM), `1` otherwise. `internal/cli/run.go`,
-  `cmd/osapi/main.go: exitCode`.
+  print it twice. Exit codes: `0` success, `124` on `cli.ErrTimeout`
+  (`--timeout`), `130` on `context.Canceled` (Ctrl-C/SIGTERM), `1` otherwise.
+  `internal/cli/run.go`, `cmd/osapi/main.go: exitCode`.
 - **The HTTP client has no `Timeout`.** Cancellation is driven by the request
-  context, which the signal handler and retry engine own.
+  context, which the signal handler, the retry engine and `--timeout` own.
   `internal/osclient/client.go: New`.
 
 ## Testing layout

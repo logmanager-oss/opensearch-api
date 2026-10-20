@@ -148,10 +148,12 @@ A SIGTERM or Ctrl-C while a call is in flight interrupts the run. `osapi`
 prints a summary naming the in-flight call and the not-run count, then exits
 `130` — the same as any other `osapi` invocation.
 
-There is no built-in time bound on a run. `retry: -1` retries a call forever
-until it succeeds or the process receives SIGTERM. There is no `--timeout`
-equivalent. The summary line still prints on that path, so an operator
-watching stderr sees exactly what completed before the interrupt.
+`--timeout` bounds the whole run, retries included. On expiry the summary
+names the in-flight call with `timed out during call`, and `osapi run` exits
+`124`. Without `--timeout`, `retry: -1` retries a call forever until it
+succeeds or the process receives SIGTERM. The summary line still prints on
+both paths, so an operator watching stderr sees exactly what completed before
+the interrupt or the timeout.
 
 ## Capture and `${name}`
 
@@ -266,7 +268,7 @@ response can never overwrite the lines above it.
 ## Precedence
 
 Connection settings (`--endpoint`, `-u`, `--password`, `--ca-cert`,
-`--env-file`, `-k`) resolve exactly as for a single request — see
+`--env-file`, `-k`, `--timeout`) resolve exactly as for a single request — see
 [Configuration precedence](cli.md#configuration-precedence). Retry settings
 (`retry`, `backoff`, `backoff-initial`, ...) come from the YAML alone: `run`
 has no `--retry`/`--backoff` flags, and passing one is an "unknown flag"

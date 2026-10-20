@@ -97,9 +97,9 @@ Defaults: `linear`, `--backoff-initial 2s`, `--backoff-max 30s`, no jitter.
 ## Errors and exit codes
 
 On any non-success outcome the exit code is `1`. Ctrl-C or SIGTERM exits
-`130`. The response body **always** prints to stdout, including for failing
-responses, so you can inspect `4xx`/`5xx` payloads or a body a predicate
-rejected.
+`130`. A `--timeout` that elapses exits `124`. The response body **always**
+prints to stdout, including for failing responses, so you can inspect
+`4xx`/`5xx` payloads or a body a predicate rejected.
 
 The stderr error names the deciding classification rule:
 
