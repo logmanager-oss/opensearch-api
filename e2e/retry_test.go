@@ -85,5 +85,5 @@ func TestRetry_SuccessWhenNonJSONBodyWarns(t *testing.T) {
 		"--success-when", ".status")...)
 	require.Equal(t, 1, res.exitCode)
 	assert.Contains(t, res.stderr, "not valid JSON")
-	assert.Contains(t, res.stderr, "retries exhausted: --success-when not satisfied")
+	assert.Contains(t, res.stderr, "status 200 rejected: --success-when not satisfied")
 }
