@@ -69,3 +69,9 @@ jobs:
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8  # v3.2.0
         with:
           subject-path: dist/*.tar.gz, dist/*.sbom.json, dist/checksums.txt
+
+      # Last on purpose: a failure in any step above leaves an unsigned draft, never a public release.
+      - name: Publish release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release edit "${GITHUB_REF#refs/tags/}" --draft=false
