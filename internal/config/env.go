@@ -12,6 +12,11 @@ const (
 	envOpenSearchPassword = "OPENSEARCH_PASSWORD"
 )
 
+// OSAPI-specific environment variables.
+const (
+	envOSAPITimeout = "OSAPI_TIMEOUT"
+)
+
 // lookupEnv reads a single variable, staying nil-safe and treating an
 // exported-but-empty value as unset.
 func lookupEnv(env EnvLookup, key string) (string, bool) {
@@ -26,6 +31,10 @@ func lookupEnv(env EnvLookup, key string) (string, bool) {
 
 func envEndpoint(env EnvLookup) (string, bool) {
 	return lookupEnv(env, envOpenSearchURL)
+}
+
+func envTimeout(env EnvLookup) (string, bool) {
+	return lookupEnv(env, envOSAPITimeout)
 }
 
 func envUsername(env EnvLookup) (string, bool) {

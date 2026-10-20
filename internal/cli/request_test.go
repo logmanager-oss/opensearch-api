@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -474,4 +475,56 @@ func TestRequestBodySkeleton(t *testing.T) {
 		assert.Equal(t, "{}\n", stdout)
 		assert.Contains(t, stderr, "no top-level field template")
 	})
+}
+
+// newBlockingServer never answers: each handler waits until the client
+// gives up.
+func newBlockingServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func TestRequestTimeout(t *testing.T) {
+	srv := newBlockingServer(t)
+
+	start := time.Now()
+	_, _, err := run(t, nil, "--endpoint", srv.URL, "-u", "admin", "--password", "secret", "--path", "x",
+		"--timeout", "50ms")
+	require.ErrorIs(t, err, ErrTimeout)
+	assert.EqualError(t, err, "timed out after 50ms")
+	assert.Less(t, time.Since(start), 2*time.Second)
+}
+
+func TestRequestTimeoutStopsRetries(t *testing.T) {
+	var rec capture
+	srv := newServer(t, &rec, []int{http.StatusServiceUnavailable})
+
+	start := time.Now()
+	_, _, err := run(t, nil, "--endpoint", srv.URL, "-u", "admin", "--password", "secret", "--path", "x",
+		"--retry", "-1", "--backoff-initial", "10ms", "--backoff-max", "10ms",
+		"--timeout", "500ms")
+	require.ErrorIs(t, err, ErrTimeout)
+	assert.Less(t, time.Since(start), 2*time.Second)
+	assert.GreaterOrEqual(t, rec.len(), 1)
+}
+
+func TestRequestTimeoutUnexpiredIsNoError(t *testing.T) {
+	var rec capture
+	srv := newServer(t, &rec, []int{http.StatusOK})
+
+	stdout, _, err := run(t, nil, "--endpoint", srv.URL, "-u", "admin", "--password", "secret", "--path", "x",
+		"--timeout", "5s")
+	require.NoError(t, err)
+	assert.Equal(t, "body-200", stdout)
+}
+
+func TestRequestTimeoutNegativeIsError(t *testing.T) {
+	_, _, err := run(t, nil, "--endpoint", "http://127.0.0.1:1", "-u", "admin", "--password", "secret",
+		"--path", "x", "--timeout", "-1s")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "must not be negative")
 }

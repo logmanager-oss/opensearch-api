@@ -28,6 +28,7 @@ type connFlags struct {
 	insecure bool
 	verbose  bool
 	envFile  string
+	timeout  time.Duration
 }
 
 // registerConnFlags declares the connection flags on cmd. Shorthands are part
@@ -53,7 +54,9 @@ func registerConnFlags(cmd *cobra.Command, c *connFlags) {
 	f.BoolVarP(&c.verbose, "verbose", "v", false,
 		"print per-attempt retry detail to stderr")
 	f.StringVar(&c.envFile, "env-file", "",
-		"path to a dotenv file providing OPENSEARCH_URL/USERNAME/PASSWORD")
+		"path to a dotenv file providing OPENSEARCH_URL/USERNAME/PASSWORD and OSAPI_TIMEOUT")
+	f.DurationVar(&c.timeout, config.FieldTimeout, 0,
+		"bound the whole invocation, retries included, e.g. 30s (0 = no bound)")
 }
 
 // requestFlags holds the root command's flags: the connection settings plus
@@ -82,8 +85,6 @@ func runRequest(cmd *cobra.Command, qf *requestFlags) error {
 	if qf.bodySkeleton {
 		return printBodySkeleton(cmd.OutOrStdout(), cmd.ErrOrStderr(), qf.path, qf.method)
 	}
-
-	ctx := cmd.Context()
 
 	cfg, retryWhen, successWhen, err := resolveConfig(cmd, qf)
 	if err != nil {
@@ -127,6 +128,9 @@ func runRequest(cmd *cobra.Command, qf *requestFlags) error {
 		return err
 	}
 
+	ctx, cancel := withTimeout(cmd.Context(), cfg.Timeout)
+	defer cancel()
+
 	engine := retry.New(cfg.Retry,
 		retry.WithOnRetry(verboseHook(cmd.ErrOrStderr(), qf.verbose)),
 		retry.WithRetryWhen(retryWhen), retry.WithSuccessWhen(successWhen),
@@ -149,10 +153,10 @@ func runRequest(cmd *cobra.Command, qf *requestFlags) error {
 		_, copyErr := io.Copy(cmd.OutOrStdout(), resp.Body)
 		_ = resp.Body.Close()
 		if doErr == nil && copyErr != nil {
-			return fmt.Errorf("writing response body: %w", copyErr)
+			doErr = fmt.Errorf("writing response body: %w", copyErr)
 		}
 	}
-	return doErr
+	return timeoutError(ctx, cfg.Timeout, doErr)
 }
 
 // resolveConfig merges flags, env file, process env and defaults, compiles
@@ -178,6 +182,7 @@ func resolveConfig(cmd *cobra.Command, qf *requestFlags) (_ config.Config, retry
 		Password:   qf.password,
 		CACertPath: qf.caCert,
 		Insecure:   qf.insecure,
+		Timeout:    qf.timeout,
 		Retry: config.RetryConfig{
 			MaxRetries:    qf.retry,
 			Strategy:      strategy,

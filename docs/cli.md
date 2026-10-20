@@ -26,6 +26,7 @@ subcommand.
 | `-k, --insecure` |         | skip TLS certificate verification                                |
 | `--env-file`     |         | path to a dotenv file providing the environment variables below  |
 | `-v, --verbose`  |         | print per-attempt retry detail to stderr                         |
+| `--timeout`      |         | bound the whole invocation, retries included, e.g. `30s` (0 = no bound). The clock starts at the first request |
 
 ### Request
 
@@ -71,6 +72,7 @@ file):
 | endpoint | `OPENSEARCH_URL`      |
 | username | `OPENSEARCH_USERNAME` |
 | password | `OPENSEARCH_PASSWORD` |
+| timeout  | `OSAPI_TIMEOUT`       |
 
 Values in an `--env-file` take precedence over the process environment, so a
 file can override whatever is exported in the shell.
@@ -121,6 +123,7 @@ how to refresh the vendored spec.
 | ----- | ------------------------------------------------ |
 | `0`   | the response was classified a success            |
 | `1`   | any non-success outcome                          |
+| `124` | `--timeout` elapsed                              |
 | `130` | interrupted (Ctrl-C or SIGTERM)                  |
 
 The response body always prints to stdout, including for `4xx`/`5xx`
@@ -206,6 +209,13 @@ Watch each attempt while debugging a retry loop:
 
 ```sh
 osapi -v --path _cluster/health --retry 5 --success-when '.status == "green"'
+```
+
+Bound a one-shot cron call to 30 seconds, with up to 3 retries inside that
+bound. The deadline wins over any remaining retries:
+
+```sh
+osapi --path _cluster/health --timeout 30s --retry 3
 ```
 
 ## See also

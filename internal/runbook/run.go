@@ -45,7 +45,11 @@ func (r *Runner) Run(ctx context.Context, rb *Runbook) error {
 
 		notRun := len(rb.Calls) - idx - 1
 		if isContextErr(ctx, err) {
-			r.writeCanceledSummary(succeeded, tolerated, call.Name, notRun)
+			how := "interrupted"
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				how = "timed out"
+			}
+			r.writeCanceledSummary(how, succeeded, tolerated, call.Name, notRun)
 			return err
 		}
 		if call.ContinueOnFailure {
@@ -388,13 +392,13 @@ func (r *Runner) writeHaltSummary(succeeded, tolerated, notRun int) {
 	_, _ = fmt.Fprintf(r.Stderr, "run: %d succeeded, 1 failed (halted), %d not run\n", succeeded, notRun)
 }
 
-// After a SIGTERM this line is the only record of the run, so it accounts
-// for tolerated failures too.
-func (r *Runner) writeCanceledSummary(succeeded, tolerated int, name string, notRun int) {
+// After a SIGTERM or a deadline this line is the only record of the run, so
+// it accounts for tolerated failures too.
+func (r *Runner) writeCanceledSummary(how string, succeeded, tolerated int, name string, notRun int) {
 	if tolerated > 0 {
-		_, _ = fmt.Fprintf(r.Stderr, "run: %d succeeded, %d failed (tolerated), interrupted during call %q, %d not run\n",
-			succeeded, tolerated, name, notRun)
+		_, _ = fmt.Fprintf(r.Stderr, "run: %d succeeded, %d failed (tolerated), %s during call %q, %d not run\n",
+			succeeded, tolerated, how, name, notRun)
 		return
 	}
-	_, _ = fmt.Fprintf(r.Stderr, "run: %d succeeded, interrupted during call %q, %d not run\n", succeeded, name, notRun)
+	_, _ = fmt.Fprintf(r.Stderr, "run: %d succeeded, %s during call %q, %d not run\n", succeeded, how, name, notRun)
 }
