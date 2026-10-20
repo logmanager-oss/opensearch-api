@@ -9,7 +9,7 @@ export E2E_OPENSEARCH_PORT
 E2E_URL := https://127.0.0.1:$(E2E_OPENSEARCH_PORT)
 E2E_GOTEST := E2E_OPENSEARCH_URL=$(E2E_URL) go test -tags e2e -count=1
 
-.PHONY: build test lint generate tidy fmt clean update-spec e2e-up e2e-down e2e e2e-test
+.PHONY: build test lint fuzz generate tidy fmt clean update-spec e2e-up e2e-down e2e e2e-test
 
 build:
 	go build -o $(BINARY) $(PKG)
@@ -19,6 +19,15 @@ test:
 
 lint:
 	golangci-lint run
+
+# One go test invocation per target: -fuzz accepts a single function.
+FUZZTIME ?= 20s
+fuzz:
+	go test ./internal/config -run='^$$' -fuzz='^FuzzParseSize$$' -fuzztime=$(FUZZTIME)
+	go test ./internal/osclient -run='^$$' -fuzz='^FuzzBuildRequest$$' -fuzztime=$(FUZZTIME)
+	go test ./internal/retry -run='^$$' -fuzz='^FuzzClassify$$' -fuzztime=$(FUZZTIME)
+	go test ./internal/runbook -run='^$$' -fuzz='^FuzzScanTemplate$$' -fuzztime=$(FUZZTIME)
+	go test ./internal/runbook -run='^$$' -fuzz='^FuzzLoad$$' -fuzztime=$(FUZZTIME)
 
 generate:
 	go generate ./...

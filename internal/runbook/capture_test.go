@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"math/big"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -301,4 +302,19 @@ func TestScanTemplateUnterminatedReferenceIsAnError(t *testing.T) {
 	require.Error(t, err)
 	assert.ErrorContains(t, err, "unterminated")
 	assert.False(t, called, "resolve must never run for a reference that never closes")
+}
+
+// FuzzScanTemplate drives the byte-index arithmetic around "$", "${" and
+// "$${". A string without "${" must pass through unchanged.
+func FuzzScanTemplate(f *testing.F) {
+	for _, seed := range []string{"$${a}${b}", "${}", "${${a}}", "${a${b}", "no references here", "$", "${", "$$", "$${", "a$"} {
+		f.Add(seed)
+	}
+	f.Fuzz(func(t *testing.T, s string) {
+		out, err := scanTemplate(s, func(name string) (string, error) { return "<" + name + ">", nil })
+		if !strings.Contains(s, "${") {
+			require.NoError(t, err)
+			assert.Equal(t, s, out)
+		}
+	})
 }

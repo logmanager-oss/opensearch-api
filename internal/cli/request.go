@@ -263,5 +263,5 @@ func isTerminal(r io.Reader) bool {
 	if !ok {
 		return false
 	}
-	return term.IsTerminal(int(f.Fd()))
+	return term.IsTerminal(int(f.Fd())) //nolint:gosec // G115: a file fd fits int on every supported platform
 }
