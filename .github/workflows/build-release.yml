@@ -38,12 +38,14 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      # The .sigstore.json suffix is what Scorecard's Signed-Releases check and
+      # sigstore tooling recognise as a Sigstore bundle.
       - name: Sign release artifacts
         env:
           COSIGN_YES: "true"
         run: |
           for artifact in dist/*.tar.gz dist/*.sbom.json dist/checksums.txt; do
-            cosign sign-blob --bundle="${artifact}.bundle" --new-bundle-format=false "${artifact}"
+            cosign sign-blob --bundle="${artifact}.sigstore.json" "${artifact}"
           done
 
       - name: Upload signature bundles to release
@@ -51,7 +53,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           tag="${GITHUB_REF#refs/tags/}"
-          find dist -name "*.bundle" -exec gh release upload "${tag}" {} --clobber \;
+          find dist -name "*.sigstore.json" -exec gh release upload "${tag}" {} --clobber \;
 
       - name: Generate SLSA provenance attestation
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8  # v3.2.0
