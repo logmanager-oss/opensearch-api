@@ -359,10 +359,49 @@ func TestEngineDoNoRetry(t *testing.T) {
 	require.NotNil(t, resp) // single attempt still returns the response body
 	defer func() { _ = resp.Body.Close() }()
 	assert.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
-	assert.ErrorIs(t, err, ErrRetriesExhausted)
-	assert.Contains(t, err.Error(), "after 1 attempts")
+	assert.ErrorIs(t, err, ErrStatusRejected)
+	assert.NotErrorIs(t, err, ErrRetriesExhausted)
+	assert.Equal(t, "status 503 rejected", err.Error())
 	assert.Equal(t, int32(1), atomic.LoadInt32(counter))
 	assert.Empty(t, *delays)
+}
+
+func TestEngineDoNoRetryTransportErrorReturnsCause(t *testing.T) {
+	sleep, delays := recordingSleep()
+	cfg := fixedRetryCfg()
+	cfg.MaxRetries = 0
+	e := New(cfg, WithSleep(sleep))
+
+	cause := errors.New("dial tcp: connection refused")
+	attempt := func(context.Context) (*http.Response, error) { return nil, cause }
+
+	resp, err := e.Do(context.Background(), attempt) //nolint:bodyclose // transport error returns a nil response
+	require.Error(t, err)
+	assert.Nil(t, resp)
+	assert.ErrorIs(t, err, cause)
+	assert.NotContains(t, err.Error(), "retries exhausted")
+	assert.NotContains(t, err.Error(), "rejected")
+	assert.Empty(t, *delays)
+}
+
+func TestEngineDoNoRetrySuccessWhenCarriesReason(t *testing.T) {
+	srv, _ := scriptServerWithBodies(t, attemptScript{status: 200, body: `{"ok":false}`})
+	sleep, _ := recordingSleep()
+	cfg := fixedRetryCfg()
+	cfg.MaxRetries = 0
+	successWhen, err := CompilePredicate(".ok")
+	require.NoError(t, err)
+	e := New(cfg, WithSleep(sleep), WithSuccessWhen(successWhen))
+
+	resp, err := e.Do(context.Background(), serverAttempt(srv))
+	require.Error(t, err)
+	require.NotNil(t, resp)
+	defer func() { _ = resp.Body.Close() }()
+	assert.ErrorIs(t, err, ErrStatusRejected)
+	assert.Equal(t, "status 200 rejected: --success-when not satisfied", err.Error())
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"ok":false}`, string(body))
 }
 
 // Item 8: a context error surfaced as the attempt's transport error (while

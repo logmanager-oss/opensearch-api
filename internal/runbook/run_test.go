@@ -352,6 +352,37 @@ calls:
 	assert.Contains(t, stderr.String(), `call "maybe_missing": ok (status 404, 1 attempt)`)
 }
 
+func TestRunNoRetryFailureNamesStatus(t *testing.T) {
+	tests := []struct {
+		name   string
+		status int
+		extra  string
+		want   string
+	}{
+		{name: "rejected status", status: http.StatusNotFound, want: `call "probe": failed (status 404, rejected, 1 attempt)`},
+		{
+			name:   "success-when falsy",
+			status: http.StatusOK,
+			extra:  "    success-when: '.status == \"green\"'\n",
+			want:   `call "probe": failed (status 200, --success-when not satisfied, 1 attempt)`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var rec recorder
+			srv := newMuxServer(t, &rec, map[string]*pathScript{
+				"/probe": {statuses: []int{tt.status}, bodies: []string{`{"status":"yellow"}`}},
+			})
+
+			out, err := runRunbook(t, srv, "calls:\n  - name: probe\n    path: /probe\n"+tt.extra)
+
+			require.ErrorIs(t, err, retry.ErrStatusRejected)
+			assert.Contains(t, out, tt.want)
+			assert.NotContains(t, out, "retries exhausted")
+		})
+	}
+}
+
 func TestRunContextCanceledMidRun(t *testing.T) {
 	var rec recorder
 	gotRequest := make(chan struct{})
@@ -882,8 +913,7 @@ calls:
 `)
 
 	require.Error(t, err)
-	assert.Contains(t, out, `call "truncated": failed (retries exhausted`)
-	assert.Contains(t, out, "reading response body")
+	assert.Contains(t, out, `call "truncated": failed (reading response body`)
 	assert.NotContains(t, out, "transport error")
 }
 

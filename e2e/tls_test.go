@@ -24,7 +24,6 @@ func TestTLS_SystemRootsRejected(t *testing.T) {
 	require.Equal(t, 1, res.exitCode)
 	assert.Empty(t, res.stdout)
 	assert.Contains(t, res.stderr, "x509")
-	assert.Contains(t, res.stderr, "retries exhausted")
 }
 
 func TestTLS_CACertWorks(t *testing.T) {

@@ -20,6 +20,9 @@ var (
 	ErrTerminalStatus = errors.New("terminal status")
 	// ErrRetriesExhausted is returned when the retry budget is exhausted.
 	ErrRetriesExhausted = errors.New("retries exhausted")
+	// ErrStatusRejected is returned when the single attempt gets a non-success
+	// response and no retry is configured. A transport error returns its cause.
+	ErrStatusRejected = errors.New("rejected")
 )
 
 // Attempt performs a single request. Implementations must honour ctx.
@@ -115,7 +118,8 @@ func New(cfg config.RetryConfig, opts ...Option) *Engine {
 // predicate evaluation just close: the socket is at EOF, or deliberately
 // abandoned when over-cap rather than draining a possibly huge remainder). Attempt
 // exhaustion wraps the final classification reason (e.g. "--success-when not
-// satisfied") when one applies. The Engine and attempt must be non-nil.
+// satisfied") when one applies. With MaxRetries 0 a failed attempt returns
+// ErrStatusRejected, or the transport error itself. The Engine and attempt must be non-nil.
 func (e *Engine) Do(ctx context.Context, attempt Attempt) (*http.Response, error) {
 	for n := 1; ; n++ {
 		resp, err := attempt(ctx)
@@ -164,11 +168,21 @@ func (e *Engine) Do(ctx context.Context, attempt Attempt) (*http.Response, error
 		// n attempts done so far means n-1 retries; stop once the retry budget
 		// (MaxRetries, <0 = unlimited) is used up.
 		if e.cfg.MaxRetries >= 0 && n > e.cfg.MaxRetries {
-			// Exhausted: hand the final response back with its body open (like
-			// Terminal) so the caller can still read it. A transport (or
-			// body-read) error leaves resp nil (no body), so surface its cause in
-			// the chain — both ErrRetriesExhausted and the cause stay
-			// errors.Is-matchable.
+			// Exhausted: return the final response with its body open, like Terminal
+			// (nil on a transport or body-read error).
+			if e.cfg.MaxRetries == 0 {
+				// No retry configured: report the attempt outcome, not the budget.
+				if err != nil {
+					drainStatus(resp)
+					return nil, err
+				}
+				if reason != "" {
+					return resp, fmt.Errorf("status %d %w: %s", respStatus, ErrStatusRejected, reason)
+				}
+				return resp, fmt.Errorf("status %d %w", respStatus, ErrStatusRejected)
+			}
+			// A transport or body-read error leaves resp nil, so wrap its cause:
+			// ErrRetriesExhausted and the cause both match errors.Is.
 			if err != nil {
 				drainStatus(resp) // nil on a transport/body-read error, but never leak a body if one is returned
 				return nil, fmt.Errorf("after %d attempts: %w: %w", n, ErrRetriesExhausted, err)

@@ -106,10 +106,14 @@ The stderr error names the deciding classification rule:
 | Message | Meaning |
 | ------- | ------- |
 | `terminal status <code>: terminal status` | rule 2: an `--abort-on` status ended the attempt loop |
-| `after <n> attempts: retries exhausted: --retry-when matched` | rule 3 decided the final attempt |
-| `after <n> attempts: retries exhausted: --success-when not satisfied` | rule 5 decided the final attempt |
-| `after <n> attempts: retries exhausted: <transport error>` | rule 1 decided the final attempt |
-| `after <n> attempts: retries exhausted` | rule 7: plain non-2xx status |
+| `status <code> rejected` | `--retry 0`: rule 7, plain non-2xx status |
+| `status <code> rejected: --retry-when matched` | `--retry 0`: rule 3 |
+| `status <code> rejected: --success-when not satisfied` | `--retry 0`: rule 5 |
+| `<transport error>` | `--retry 0`: rule 1 |
+| `after <n> attempts: retries exhausted: --retry-when matched` | `--retry N`, N >= 1: rule 3 decided the final attempt |
+| `after <n> attempts: retries exhausted: --success-when not satisfied` | `--retry N`, N >= 1: rule 5 decided the final attempt |
+| `after <n> attempts: retries exhausted: <transport error>` | `--retry N`, N >= 1: rule 1 decided the final attempt |
+| `after <n> attempts: retries exhausted` | `--retry N`, N >= 1: rule 7 decided the final attempt |
 
 ## See also
 
