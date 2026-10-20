@@ -33,12 +33,15 @@ func run(ctx context.Context) int {
 	return exitCode(err)
 }
 
-// exitCode maps a command error to a process exit code: 0 on success, 130 when
-// the context was canceled (e.g. Ctrl-C), 1 otherwise.
+// exitCode maps a command error to a process exit code: 0 on success, 124 when
+// --timeout elapsed, 130 when the context was canceled (e.g. Ctrl-C), 1
+// otherwise.
 func exitCode(err error) int {
 	switch {
 	case err == nil:
 		return 0
+	case errors.Is(err, cli.ErrTimeout):
+		return 124
 	case errors.Is(err, context.Canceled):
 		return 130
 	default:
