@@ -1,5 +1,7 @@
 # opensearch-api
 
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/logmanager-oss/opensearch-api/badge)](https://scorecard.dev/viewer/?uri=github.com/logmanager-oss/opensearch-api)
+
 `osapi` is a small, general-purpose CLI for talking to any OpenSearch REST
 endpoint with robust retry behaviour. It behaves like a resilient `curl` for
 OpenSearch. The response body is written to **stdout** (pipe it to `jq`);

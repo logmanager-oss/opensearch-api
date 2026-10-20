@@ -51,9 +51,6 @@ jobs:
       - name: Test
         run: go test -race -count=1 ./...
 
-      - name: Check for vulnerabilities
-        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
-
   e2e:
     name: E2E
     runs-on: ubuntu-latest
