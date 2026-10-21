@@ -1,6 +1,6 @@
 module github.com/logmanager-oss/opensearch-api/internal/apispec/gen
 
-go 1.26.4
+go 1.26.10
 
 require github.com/pb33f/libopenapi v0.41.6
 
