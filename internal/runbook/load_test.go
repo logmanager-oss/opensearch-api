@@ -160,6 +160,17 @@ calls:
 			wantErrMsg: []string{"line 3", "name"},
 		},
 		{
+			name: "call with both abort-on and retry-on names the call",
+			src: `
+calls:
+  - name: read_doc
+    path: /my-index/_doc/1
+    abort-on: [400]
+    retry-on: [409]
+`,
+			wantErrMsg: []string{"read_doc", "mutually exclusive"},
+		},
+		{
 			name: "call item that is a sequence is not mistaken for a mapping",
 			src: `
 calls:
@@ -421,13 +432,17 @@ calls:
   - name: replaces_abort_on
     path: /c
     abort-on: [500]
+  - name: switches_to_retry_on
+    path: /d
+    retry-on: [409]
 `
 	rb, err := Load(strings.NewReader(src), "")
 	require.NoError(t, err)
-	require.Len(t, rb.Calls, 3)
+	require.Len(t, rb.Calls, 4)
 
 	assert.Equal(t, 3, rb.Calls[0].Retry.MaxRetries)
 	assert.Equal(t, []int{400, 401, 403}, rb.Calls[0].Retry.AbortOn)
+	assert.Nil(t, rb.Calls[0].Retry.RetryOn)
 
 	assert.Equal(t, 9, rb.Calls[1].Retry.MaxRetries)
 	assert.Equal(t, []int{400, 401, 403}, rb.Calls[1].Retry.AbortOn)
@@ -435,9 +450,40 @@ calls:
 	assert.Equal(t, 3, rb.Calls[2].Retry.MaxRetries)
 	assert.Equal(t, []int{500}, rb.Calls[2].Retry.AbortOn, "abort-on replaces the defaults list rather than appending")
 
+	assert.Nil(t, rb.Calls[3].Retry.AbortOn, "a call's own retry-on drops the inherited abort-on")
+	assert.Equal(t, []int{409}, rb.Calls[3].Retry.RetryOn)
+
 	// Calls that inherit abort-on must not share one backing array.
 	rb.Calls[0].Retry.AbortOn[0] = 999
 	assert.Equal(t, 400, rb.Calls[1].Retry.AbortOn[0], "inherited abort-on is cloned per call")
+}
+
+func TestLoadDefaultsRetryOnLayering(t *testing.T) {
+	src := `
+defaults:
+  retry-on: [409]
+
+calls:
+  - name: inherits_retry_on
+    path: /a
+  - name: switches_to_abort_on
+    path: /b
+    abort-on: [500]
+  - name: inherits_again
+    path: /c
+`
+	rb, err := Load(strings.NewReader(src), "")
+	require.NoError(t, err)
+	require.Len(t, rb.Calls, 3)
+
+	assert.Equal(t, []int{409}, rb.Calls[0].Retry.RetryOn)
+	assert.Nil(t, rb.Calls[0].Retry.AbortOn)
+
+	assert.Nil(t, rb.Calls[1].Retry.RetryOn, "a call's own abort-on drops the inherited retry-on")
+	assert.Equal(t, []int{500}, rb.Calls[1].Retry.AbortOn)
+
+	rb.Calls[0].Retry.RetryOn[0] = 999
+	assert.Equal(t, 409, rb.Calls[2].Retry.RetryOn[0], "inherited retry-on is cloned per call")
 }
 
 // Defaults must layer for every key kind, not just the two scalars the happy
@@ -822,6 +868,7 @@ func TestLoadDefaultsInvalidFieldValues(t *testing.T) {
 		{name: "bad success-when jq", defaultsKey: "success-when: '.foo['", wantErrMsg: "success-when"},
 		{name: "missing body file inherited from defaults", defaultsKey: "body: '@missing-defaults-file.json'", wantErrMsg: "missing-defaults-file.json"},
 		{name: "bad method", defaultsKey: "method: 'GET EXTRA'", wantErrMsg: "GET EXTRA"},
+		{name: "abort-on and retry-on together", defaultsKey: "abort-on: [400]\n  retry-on: [409]", wantErrMsg: "mutually exclusive"},
 	}
 
 	for _, tt := range tests {

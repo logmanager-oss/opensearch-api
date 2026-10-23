@@ -116,6 +116,7 @@ type callSpec struct {
 	BackoffMax        string            `yaml:"backoff-max"`
 	BackoffJitter     float64           `yaml:"backoff-jitter"`
 	AbortOn           []int             `yaml:"abort-on"`
+	RetryOn           []int             `yaml:"retry-on"`
 	RetryWhen         string            `yaml:"retry-when"`
 	SuccessWhen       string            `yaml:"success-when"`
 	ContinueOnFailure bool              `yaml:"continue-on-failure"`
@@ -237,7 +238,7 @@ var callAllowedKeys = map[string]bool{
 	"name": true, "method": true, "path": true, "body": true,
 	"query": true, "headers": true, "retry": true, "backoff": true,
 	"backoff-initial": true, "backoff-max": true, "backoff-jitter": true,
-	"abort-on": true, "retry-when": true, "success-when": true,
+	"abort-on": true, "retry-on": true, "retry-when": true, "success-when": true,
 	"capture": true, "continue-on-failure": true, "max-body-buffer": true,
 }
 
@@ -361,6 +362,13 @@ func (l *loader) call(item *yaml.Node) (Call, error) {
 	spec.Headers = nil
 	if err := item.Decode(&spec); err != nil {
 		return Call{}, fmt.Errorf("%s: %w", ref, err)
+	}
+	ownRetryOn, ownAbortOn := mappingHasKey(item, "retry-on"), mappingHasKey(item, "abort-on")
+	if ownRetryOn && !ownAbortOn {
+		spec.AbortOn = nil
+	}
+	if ownAbortOn && !ownRetryOn {
+		spec.RetryOn = nil
 	}
 	headers := mergeHeaders(l.defaults.Headers, spec.Headers)
 	if spec.Name == "" {
@@ -518,15 +526,19 @@ func buildRetryConfig(spec *callSpec) (config.RetryConfig, error) {
 		}
 	}
 
+	if len(spec.AbortOn) > 0 && len(spec.RetryOn) > 0 {
+		return config.RetryConfig{}, errors.New("abort-on and retry-on are mutually exclusive")
+	}
+
 	return config.RetryConfig{
 		MaxRetries: spec.Retry,
 		Strategy:   strategy,
 		Initial:    initial,
 		Max:        maxDelay,
 		Jitter:     spec.BackoffJitter,
-		// Cloned for the same reason config.Resolve clones it: every call that
-		// inherits abort-on would otherwise share one backing array.
+		// Cloned as config.Resolve does: calls that inherit a list would share one backing array.
 		AbortOn:       slices.Clone(spec.AbortOn),
+		RetryOn:       slices.Clone(spec.RetryOn),
 		RetryWhen:     spec.RetryWhen,
 		SuccessWhen:   spec.SuccessWhen,
 		MaxBodyBuffer: maxBodyBuffer,
