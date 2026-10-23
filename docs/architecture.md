@@ -101,8 +101,9 @@ Each entry: the decision, why, and where it lives.
 - **A conditional update composes inside one Attempt.** `ism set` runs a
   `GET` and a `PUT` as one `retry.Attempt`, so the pair has one retry budget
   and one timeout. A `409` means the policy changed: the next attempt reads it
-  again (`internal/osclient/upsert.go`). `ism reapply` is two separate
-  requests, each with its own retry budget, under one timeout.
+  again (`internal/osclient/upsert.go`). `ism reapply` is one `explain` plus one
+  `change_policy` per index, each with its own retry budget, under one
+  timeout.
 - **Basic auth is origin-gated.** Credentials attach only when the request
   matches the configured endpoint's scheme, host, and port, so a redirect to
   another origin never receives them. Userinfo is stripped from endpoint URLs

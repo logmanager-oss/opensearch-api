@@ -66,7 +66,7 @@ Semantics live in [Retry and classification](retry.md).
 | Verb | Requests | stdout |
 | ---- | -------- | ------ |
 | `ism set <id>` | `GET _plugins/_ism/policies/<id>`, then a conditional `PUT` unless the policy is unchanged | the final response body: the `PUT`, or the `GET` when unchanged or when the `GET` fails |
-| `ism reapply <id>` | `GET _plugins/_ism/explain[/<target>]?size=10000`, then `POST _plugins/_ism/change_policy/<managed indices>` with `{"policy_id":"<id>"}` | the `change_policy` body, or the `explain` body when `explain` fails |
+| `ism reapply <id>` | `GET _plugins/_ism/explain[/<target>]?size=10000`, then one `POST _plugins/_ism/change_policy/<index>` with `{"policy_id":"<id>"}` per managed index | one merged `change_policy` body, or the body of the call that failed |
 
 | Flag | Verb | Default | Description |
 | ---- | ---- | ------- | ----------- |
@@ -110,14 +110,22 @@ path. Neither may be `.` or `..`, or contain `/`, `?`, `#` or `%`. An empty
 
 ### `ism reapply`
 
-- `reapply` lists the managed indices with `explain`. It sends `change_policy`
-  only for the indices whose `policy_id` equals `<id>`. An index that matches
-  `--target` but belongs to another policy keeps its policy.
+- `reapply` lists the managed indices with `explain`. It sends one
+  `change_policy` call per index whose `policy_id` equals `<id>`. An index that
+  matches `--target` but belongs to another policy keeps its policy.
+- stdout is one merged body: `updated_indices` summed, `failures` true when
+  any call reported it, `failed_indices` concatenated in index order.
+- Each call has its own retry budget under the one `--timeout`. A non-2xx
+  response stops the loop. Its body goes to stdout and the command exits `1`.
 - With no managed index, `reapply` prints `no indices are managed by <id>` on
   stderr, prints nothing on stdout, and exits `0`.
-- A 2xx `change_policy` body with `"failures": true` exits `0`. Add
-  `--success-when '.failures == false'` to make it fail. `--success-when` and
-  `--retry-when` judge only the `change_policy` response, not the `explain` call.
+- A merged body with `"failures": true` exits `0`. Add
+  `--success-when '.failures == false'` to make it fail. `--success-when`
+  judges the merged body once and never retries. `--retry-when` has no effect
+  on `reapply`.
+- `--target` needs at least one matching index. `explain` answers `400` for a
+  pattern that matches nothing, and `reapply` then exits `1`. Omit `--target`
+  when unsure: the unscoped call lists every managed index.
 - `reapply` does not page. It reads at most 10000 managed indices.
 - `explain` reflects ISM's own record of managed indices, which lags `add`,
   `remove` and template attachment by a few seconds. Deleting a policy does not

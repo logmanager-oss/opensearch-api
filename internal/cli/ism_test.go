@@ -314,33 +314,120 @@ func TestISMArgCounts(t *testing.T) {
 
 const explainAll = `{"i1":{"policy_id":"p"},"i2":{"policy_id":"q"},"i0":{"policy_id":"p"},"total_managed_indices":3}`
 
+const changeOK = `{"updated_indices":1,"failures":false,"failed_indices":[]}`
+
 func TestISMReapplyAll(t *testing.T) {
 	var rec capture
-	srv := newBodyServer(t, &rec, []int{http.StatusOK}, []string{explainAll, `{"failures":false}`})
+	srv := newBodyServer(t, &rec, []int{http.StatusOK}, []string{explainAll, changeOK, changeOK})
 
 	stdout, _, err := run(t, nil, ismArgs(srv, "ism", "reapply", "p")...)
 	require.NoError(t, err)
-	assert.Equal(t, `{"failures":false}`, stdout)
+	assert.JSONEq(t, `{"updated_indices":2,"failures":false,"failed_indices":[]}`, stdout)
 
-	require.Equal(t, 2, rec.len())
+	require.Equal(t, 3, rec.len())
 	get := rec.at(0)
 	assert.Equal(t, http.MethodGet, get.method)
 	assert.Equal(t, "/_plugins/_ism/explain", get.path)
 	assert.Equal(t, "10000", get.query.Get("size"))
-	post := rec.at(1)
-	assert.Equal(t, http.MethodPost, post.method)
-	assert.Equal(t, "/_plugins/_ism/change_policy/i0,i1", post.path)
-	assert.JSONEq(t, `{"policy_id":"p"}`, string(post.body))
+	for i, idx := range []string{"i0", "i1"} {
+		post := rec.at(i + 1)
+		assert.Equal(t, http.MethodPost, post.method)
+		assert.Equal(t, "/_plugins/_ism/change_policy/"+idx, post.path)
+		assert.JSONEq(t, `{"policy_id":"p"}`, string(post.body))
+	}
 }
 
 func TestISMReapplyTarget(t *testing.T) {
 	var rec capture
-	srv := newBodyServer(t, &rec, []int{http.StatusOK}, []string{explainAll, `{}`})
+	srv := newBodyServer(t, &rec, []int{http.StatusOK}, []string{explainAll, changeOK, changeOK})
 
 	_, _, err := run(t, nil, ismArgs(srv, "ism", "reapply", "p", "--target", "x-*,-x-audit-*")...)
 	require.NoError(t, err)
 	assert.Equal(t, "/_plugins/_ism/explain/x-*,-x-audit-*", rec.at(0).path)
 	assert.Equal(t, "10000", rec.at(0).query.Get("size"))
+	require.Equal(t, 3, rec.len())
+	assert.Equal(t, "/_plugins/_ism/change_policy/i0", rec.at(1).path)
+}
+
+func TestISMReapplyMerge(t *testing.T) {
+	f := func(s string) json.RawMessage { return json.RawMessage(s) }
+	tests := []struct {
+		name string
+		in   []changePolicyResult
+		want changePolicyResult
+	}{
+		{
+			name: "sums updated indices",
+			in:   []changePolicyResult{{UpdatedIndices: 1}, {UpdatedIndices: 3}},
+			want: changePolicyResult{UpdatedIndices: 4, FailedIndices: []json.RawMessage{}},
+		},
+		{
+			name: "ors failures and concatenates failed indices in order",
+			in: []changePolicyResult{
+				{UpdatedIndices: 1, Failures: true, FailedIndices: []json.RawMessage{f(`{"index_name":"a"}`)}},
+				{UpdatedIndices: 1},
+				{Failures: true, FailedIndices: []json.RawMessage{f(`{"index_name":"c"}`), f(`{"index_name":"d"}`)}},
+			},
+			want: changePolicyResult{
+				UpdatedIndices: 2,
+				Failures:       true,
+				FailedIndices:  []json.RawMessage{f(`{"index_name":"a"}`), f(`{"index_name":"c"}`), f(`{"index_name":"d"}`)},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := mergeChangePolicy(tt.in)
+			assert.Equal(t, tt.want, got)
+			out, err := marshalRaw(got)
+			require.NoError(t, err)
+			assert.NotContains(t, string(out), "null")
+		})
+	}
+}
+
+func TestISMReapplyPartialFailure(t *testing.T) {
+	var rec capture
+	srv := newBodyServer(t, &rec, []int{http.StatusOK, http.StatusInternalServerError},
+		[]string{explainAll, "boom"})
+
+	stdout, _, err := run(t, nil, ismArgs(srv, "ism", "reapply", "p")...)
+	require.ErrorIs(t, err, retry.ErrStatusRejected)
+	assert.Contains(t, err.Error(), "change_policy i0")
+	assert.Equal(t, "boom", stdout)
+	assert.Equal(t, 2, rec.len(), "the loop must stop at the first failure")
+}
+
+func TestISMReapplyNonJSONBody(t *testing.T) {
+	var rec capture
+	srv := newBodyServer(t, &rec, []int{http.StatusOK}, []string{explainAll, "<html>"})
+
+	stdout, _, err := run(t, nil, ismArgs(srv, "ism", "reapply", "p")...)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "decoding change_policy response for i0")
+	assert.Equal(t, "<html>", stdout)
+	assert.Equal(t, 2, rec.len())
+}
+
+func TestISMReapplyPredicateError(t *testing.T) {
+	var rec capture
+	srv := newBodyServer(t, &rec, []int{http.StatusOK}, []string{explainAll, changeOK})
+
+	_, stderr, err := run(t, nil, ismArgs(srv, "ism", "reapply", "p", "--success-when", `error("x")`)...)
+	require.ErrorIs(t, err, retry.ErrStatusRejected)
+	assert.Contains(t, stderr, "treating it as not matched")
+}
+
+func TestISMReapplyFailuresMerged(t *testing.T) {
+	failed := `{"updated_indices":0,"failures":true,"failed_indices":[{"index_name":"i1","reason":"nope"}]}`
+	want := `{"updated_indices":1,"failures":true,"failed_indices":[{"index_name":"i1","reason":"nope"}]}`
+
+	var rec capture
+	srv := newBodyServer(t, &rec, []int{http.StatusOK}, []string{explainAll, changeOK, failed})
+
+	stdout, _, err := run(t, nil, ismArgs(srv, "ism", "reapply", "p")...)
+	require.NoError(t, err)
+	assert.JSONEq(t, want, stdout)
 }
 
 func TestISMReapplyNoneManaged(t *testing.T) {
@@ -379,12 +466,13 @@ func TestISMRetryFlags(t *testing.T) {
 
 	t.Run("reapply success-when judges the change_policy body", func(t *testing.T) {
 		var rec capture
-		srv := newBodyServer(t, &rec, []int{http.StatusOK}, []string{explainAll, `{"failures":true}`})
+		srv := newBodyServer(t, &rec, []int{http.StatusOK}, []string{explainAll, changeOK,
+			`{"updated_indices":0,"failures":true,"failed_indices":[{"index_name":"i1"}]}`})
 
 		stdout, _, err := run(t, nil, ismArgs(srv, "ism", "reapply", "p", "--success-when", ".failures == false")...)
-		require.Error(t, err)
-		assert.Equal(t, `{"failures":true}`, stdout)
-		assert.Equal(t, 2, rec.len())
+		require.ErrorIs(t, err, retry.ErrStatusRejected)
+		assert.JSONEq(t, `{"updated_indices":1,"failures":true,"failed_indices":[{"index_name":"i1"}]}`, stdout)
+		assert.Equal(t, 3, rec.len())
 	})
 
 	t.Run("abort-on with retry-on is rejected before any request", func(t *testing.T) {

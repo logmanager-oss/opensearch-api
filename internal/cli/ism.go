@@ -70,15 +70,6 @@ func (s *ismSession) do(ctx context.Context, attempt retry.Attempt) error {
 	return streamBody(s.cmd, ctx, &s.cfg, resp, doErr)
 }
 
-//nolint:gocritic // hugeParam: RequestSpec is the documented value-typed public API.
-func (s *ismSession) send(ctx context.Context, spec osclient.RequestSpec) error {
-	req, err := osclient.BuildRequest(s.cfg.Endpoint, spec)
-	if err != nil {
-		return err
-	}
-	return s.do(ctx, osclient.Replay(s.client, req)) //nolint:bodyclose // streamBody closes it in do
-}
-
 // fetch runs spec and returns the body. On failure it writes the body to stdout.
 // It ignores --retry-when/--success-when, which describe the final response.
 //

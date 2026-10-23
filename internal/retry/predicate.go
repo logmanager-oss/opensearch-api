@@ -2,6 +2,7 @@ package retry
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 
 	"github.com/itchyny/gojq"
@@ -34,6 +35,16 @@ func CompilePredicate(expr string) (*Predicate, error) {
 // String returns the original jq expression, for warning messages.
 func (p *Predicate) String() string {
 	return p.expr
+}
+
+// Match reports whether p is truthy against the JSON document body.
+// A body that is not valid JSON is an error.
+func (p *Predicate) Match(ctx context.Context, body []byte) (bool, error) {
+	var doc any
+	if err := json.Unmarshal(body, &doc); err != nil {
+		return false, fmt.Errorf("decoding body for predicate %q: %w", p.expr, err)
+	}
+	return p.match(ctx, doc)
 }
 
 // match reports jq truthiness (any emitted value that is neither null nor

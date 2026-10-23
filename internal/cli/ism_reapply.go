@@ -6,11 +6,11 @@ import (
 	"net/http"
 	"slices"
 	"strconv"
-	"strings"
 
 	"github.com/spf13/cobra"
 
 	"github.com/logmanager-oss/opensearch-api/internal/osclient"
+	"github.com/logmanager-oss/opensearch-api/internal/retry"
 )
 
 // ismExplainSize is the explain page size: one page must cover every managed index.
@@ -81,12 +81,66 @@ func runISMReapply(cmd *cobra.Command, rf *ismReapplyFlags, id string) error {
 	if err != nil {
 		return err
 	}
-	return s.send(ctx, osclient.RequestSpec{
-		Method:  http.MethodPost,
-		Path:    ismChangePolicy + "/" + strings.Join(indices, ","),
-		Body:    body,
-		HasBody: true,
-	})
+	results := make([]changePolicyResult, 0, len(indices))
+	for _, index := range indices {
+		resp, err := s.fetch(ctx, osclient.RequestSpec{
+			Method:  http.MethodPost,
+			Path:    ismChangePolicy + "/" + index,
+			Body:    body,
+			HasBody: true,
+		})
+		if err != nil {
+			return fmt.Errorf("change_policy %s: %w", index, err)
+		}
+		var r changePolicyResult
+		if err := json.Unmarshal(resp, &r); err != nil {
+			_, _ = cmd.OutOrStdout().Write(resp)
+			return fmt.Errorf("decoding change_policy response for %s: %w", index, err)
+		}
+		results = append(results, r)
+	}
+
+	merged, err := marshalRaw(mergeChangePolicy(results))
+	if err != nil {
+		return err
+	}
+	if _, err := cmd.OutOrStdout().Write(merged); err != nil {
+		return fmt.Errorf("writing merged body: %w", err)
+	}
+	if s.preds.successWhen == nil {
+		return nil
+	}
+	// Mirror the engine: a jq error warns and counts as not matched, a context
+	// error maps to the usual exit code.
+	ok, err := s.preds.successWhen.Match(ctx, merged)
+	if err != nil {
+		if ctx.Err() != nil {
+			return timeoutError(ctx, s.cfg.Timeout, err)
+		}
+		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "evaluating predicate %q: %v; treating it as not matched\n",
+			s.preds.successWhen.String(), err)
+	}
+	if !ok {
+		return fmt.Errorf("merged change_policy body %w: --success-when not satisfied", retry.ErrStatusRejected)
+	}
+	return nil
+}
+
+// changePolicyResult is the part of a change_policy response that reapply merges.
+type changePolicyResult struct {
+	UpdatedIndices int               `json:"updated_indices"`
+	Failures       bool              `json:"failures"`
+	FailedIndices  []json.RawMessage `json:"failed_indices"`
+}
+
+func mergeChangePolicy(results []changePolicyResult) changePolicyResult {
+	merged := changePolicyResult{FailedIndices: []json.RawMessage{}}
+	for _, r := range results {
+		merged.UpdatedIndices += r.UpdatedIndices
+		merged.Failures = merged.Failures || r.Failures
+		merged.FailedIndices = append(merged.FailedIndices, r.FailedIndices...)
+	}
+	return merged
 }
 
 // managedBy returns the sorted index names in an explain body whose policy_id is id.
