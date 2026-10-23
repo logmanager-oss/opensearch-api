@@ -58,7 +58,8 @@ Consequences worth spelling out:
 - `--retry-on` is status-only. It beats both predicates on a non-2xx status.
   With `--retry-on 409`, a truthy `--success-when` on a `503` is terminal, not
   a success.
-- `--retry-on 200` does nothing: a 2xx is never terminal under `--retry-on`.
+- A 2xx entry in `--retry-on` is ignored: a 2xx is never terminal. But the
+  list still applies, so `--retry-on 200` alone makes every non-2xx terminal.
   A 2xx with a truthy `--retry-when` still retries.
 - Without `--retry-on`, rule 3 never applies.
 - `--abort-on` and `--retry-on` are mutually exclusive. On the command line,

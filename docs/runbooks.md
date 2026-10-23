@@ -94,7 +94,7 @@ YAML strings, parsed the same way as their flag equivalents: `'2s'`, `'1MiB'`.
 ## `defaults:` layering
 
 `defaults:` accepts every key above except `name`, `path`, and `capture` —
-those describe one specific call, not a shared policy. Three rules decide what
+those describe one specific call, not a shared policy. Four rules decide what
 a call inherits:
 
 1. **A present key always overrides, even with a zero value.** Only an omitted
