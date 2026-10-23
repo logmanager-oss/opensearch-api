@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 	"golang.org/x/term"
 
 	"github.com/logmanager-oss/opensearch-api/internal/config"
@@ -31,14 +32,13 @@ type connFlags struct {
 	timeout  time.Duration
 }
 
-// registerConnFlags declares the connection flags on cmd. Shorthands are part
+// registerConnFlags declares the connection flags on f. Shorthands are part
 // of the contract, not cosmetic: in `osapi --endpoint ... run f.yaml` cobra
 // only uses root's flags to skip over flag arguments while locating the
 // subcommand, then hands the remaining args — flags included — to that
 // subcommand's flagset. So every name and shorthand must match root's exactly,
 // or the leading flags fail to parse.
-func registerConnFlags(cmd *cobra.Command, c *connFlags) {
-	f := cmd.Flags()
+func registerConnFlags(f *pflag.FlagSet, c *connFlags) {
 	f.StringVar(&c.endpoint, config.FieldEndpoint, config.DefaultEndpoint,
 		"OpenSearch endpoint URL")
 	f.StringVarP(&c.username, config.FieldUsername, "u", "",
@@ -59,17 +59,32 @@ func registerConnFlags(cmd *cobra.Command, c *connFlags) {
 		"bound the whole invocation, retries included, e.g. 30s (0 = no bound)")
 }
 
-// requestFlags holds the root command's flags: the connection settings plus
-// the request itself.
-type requestFlags struct {
-	connFlags
+// config returns the flag values as a Config for config.Resolve.
+func (c *connFlags) config() config.Config {
+	return config.Config{
+		Endpoint:   c.endpoint,
+		Username:   c.username,
+		Password:   c.password,
+		CACertPath: c.caCert,
+		Insecure:   c.insecure,
+		Timeout:    c.timeout,
+	}
+}
 
-	method         string
-	path           string
-	body           string
-	bodySkeleton   bool
-	query          []string
-	header         []string
+// newClient builds the OpenSearch client for cfg, warning on stderr.
+func newClient(cmd *cobra.Command, cfg *config.Config) (*http.Client, error) {
+	return osclient.New(osclient.Options{
+		Endpoint:   cfg.Endpoint,
+		Username:   cfg.Username,
+		Password:   cfg.Password,
+		CACertPath: cfg.CACertPath,
+		Insecure:   cfg.Insecure,
+		Warn:       cmd.ErrOrStderr(),
+	})
+}
+
+// retryFlags holds the retry and response-classification flags.
+type retryFlags struct {
 	retry          int
 	backoff        string
 	backoffInitial time.Duration
@@ -82,24 +97,61 @@ type requestFlags struct {
 	maxBodyBuffer  string
 }
 
+// registerRetryFlags declares the retry flags on f and their mutual exclusion on cmd.
+func registerRetryFlags(cmd *cobra.Command, f *pflag.FlagSet, r *retryFlags) {
+	f.IntVar(&r.retry, config.FieldRetry, 0,
+		"number of retries (0 = none; -1 = retry until success or a terminal status from --abort-on or --retry-on)")
+	f.StringVar(&r.backoff, config.FieldBackoff, config.Linear.String(),
+		"backoff strategy between retries: constant, linear, or exponential")
+	f.DurationVar(&r.backoffInitial, config.FieldBackoffInitial, 2*time.Second,
+		"initial backoff delay")
+	f.DurationVar(&r.backoffMax, config.FieldBackoffMax, 30*time.Second,
+		"maximum backoff delay")
+	f.Float64Var(&r.backoffJitter, config.FieldBackoffJitter, 0,
+		"backoff jitter as a fraction in [0,1)")
+	f.IntSliceVar(&r.abortOn, config.FieldAbortOn, nil,
+		"status codes that stop retrying; comma-separated; only meaningful with --retry")
+	f.IntSliceVar(&r.retryOn, config.FieldRetryOn, nil,
+		"non-2xx status codes that keep retrying; every other non-2xx stops "+
+			"(comma-separated; only meaningful with --retry; excludes --abort-on)")
+	f.StringVar(&r.retryWhen, config.FieldRetryWhen, "",
+		"jq expression evaluated against the JSON response body; truthy forces a retry even on 2xx")
+	f.StringVar(&r.successWhen, config.FieldSuccessWhen, "",
+		"jq expression; the response counts as success only when truthy, regardless of status")
+	f.StringVar(&r.maxBodyBuffer, config.FieldMaxBodyBuffer, config.DefaultMaxBodyBuffer,
+		"max response body buffered for --retry-when/--success-when evaluation (e.g. 10MiB; 0 = "+
+			"unlimited); larger bodies skip predicate evaluation with a warning")
+	cmd.MarkFlagsMutuallyExclusive(config.FieldAbortOn, config.FieldRetryOn)
+}
+
+// requestFlags holds the root command's flags: the connection settings plus
+// the request itself.
+type requestFlags struct {
+	connFlags
+	retryFlags
+
+	method       string
+	path         string
+	body         string
+	bodySkeleton bool
+	query        []string
+	header       []string
+}
+
+// predicates bundles the compiled --retry-when/--success-when.
+type predicates struct{ retryWhen, successWhen *retry.Predicate }
+
 func runRequest(cmd *cobra.Command, qf *requestFlags) error {
 	if qf.bodySkeleton {
 		return printBodySkeleton(cmd.OutOrStdout(), cmd.ErrOrStderr(), qf.path, qf.method)
 	}
 
-	cfg, retryWhen, successWhen, err := resolveConfig(cmd, qf)
+	cfg, preds, err := resolveConfig(cmd, &qf.connFlags, &qf.retryFlags)
 	if err != nil {
 		return err
 	}
 
-	client, err := osclient.New(osclient.Options{
-		Endpoint:   cfg.Endpoint,
-		Username:   cfg.Username,
-		Password:   cfg.Password,
-		CACertPath: cfg.CACertPath,
-		Insecure:   cfg.Insecure,
-		Warn:       cmd.ErrOrStderr(),
-	})
+	client, err := newClient(cmd, &cfg)
 	if err != nil {
 		return err
 	}
@@ -132,24 +184,23 @@ func runRequest(cmd *cobra.Command, qf *requestFlags) error {
 	ctx, cancel := withTimeout(cmd.Context(), cfg.Timeout)
 	defer cancel()
 
-	engine := retry.New(cfg.Retry,
-		retry.WithOnRetry(verboseHook(cmd.ErrOrStderr(), qf.verbose)),
-		retry.WithRetryWhen(retryWhen), retry.WithSuccessWhen(successWhen),
-		retry.WithWarn(cmd.ErrOrStderr()))
-	resp, doErr := engine.Do(ctx, func(ctx context.Context) (*http.Response, error) {
-		c := req.Clone(ctx)
-		if req.GetBody != nil {
-			b, err := req.GetBody()
-			if err != nil {
-				return nil, fmt.Errorf("preparing request body: %w", err)
-			}
-			c.Body = b
-		}
-		return client.Do(c)
-	})
+	resp, doErr := doWithRetry(cmd, ctx, &cfg, preds, qf.verbose, osclient.Replay(client, req)) //nolint:bodyclose // streamBody closes it
+	return streamBody(cmd, ctx, &cfg, resp, doErr)
+}
 
-	// Stream the final body to stdout even on failure so 4xx/5xx payloads are
-	// still visible; the engine error is returned unchanged for exit mapping.
+// doWithRetry runs attempt under cfg.Retry with p and the verbose hook.
+func doWithRetry(cmd *cobra.Command, ctx context.Context, cfg *config.Config, p predicates, verbose bool, attempt retry.Attempt) (*http.Response, error) {
+	engine := retry.New(cfg.Retry,
+		retry.WithOnRetry(verboseHook(cmd.ErrOrStderr(), verbose)),
+		retry.WithRetryWhen(p.retryWhen), retry.WithSuccessWhen(p.successWhen),
+		retry.WithWarn(cmd.ErrOrStderr()))
+	return engine.Do(ctx, attempt)
+}
+
+// streamBody copies resp's body to stdout and maps doErr through timeoutError.
+// It streams the body even on failure, so 4xx/5xx payloads stay visible.
+// The engine error returns unchanged for exit mapping.
+func streamBody(cmd *cobra.Command, ctx context.Context, cfg *config.Config, resp *http.Response, doErr error) error {
 	if resp != nil {
 		_, copyErr := io.Copy(cmd.OutOrStdout(), resp.Body)
 		_ = resp.Body.Close()
@@ -162,40 +213,33 @@ func runRequest(cmd *cobra.Command, qf *requestFlags) error {
 
 // resolveConfig merges flags, env file, process env and defaults, compiles
 // the body predicates, then resolves the password (prompting only on a TTY).
-func resolveConfig(cmd *cobra.Command, qf *requestFlags) (_ config.Config, retryWhen, successWhen *retry.Predicate, _ error) {
-	env, err := loadEnv(qf.envFile)
+func resolveConfig(cmd *cobra.Command, cf *connFlags, rf *retryFlags) (config.Config, predicates, error) {
+	env, err := loadEnv(cf.envFile)
 	if err != nil {
-		return config.Config{}, nil, nil, err
+		return config.Config{}, predicates{}, err
 	}
 
-	strategy, err := config.ParseBackoffStrategy(qf.backoff)
+	strategy, err := config.ParseBackoffStrategy(rf.backoff)
 	if err != nil {
-		return config.Config{}, nil, nil, err
+		return config.Config{}, predicates{}, err
 	}
-	maxBodyBuffer, err := config.ParseSize(qf.maxBodyBuffer)
+	maxBodyBuffer, err := config.ParseSize(rf.maxBodyBuffer)
 	if err != nil {
-		return config.Config{}, nil, nil, fmt.Errorf("invalid --max-body-buffer: %w", err)
+		return config.Config{}, predicates{}, fmt.Errorf("invalid --max-body-buffer: %w", err)
 	}
 
-	flags := config.Config{
-		Endpoint:   qf.endpoint,
-		Username:   qf.username,
-		Password:   qf.password,
-		CACertPath: qf.caCert,
-		Insecure:   qf.insecure,
-		Timeout:    qf.timeout,
-		Retry: config.RetryConfig{
-			MaxRetries:    qf.retry,
-			Strategy:      strategy,
-			Initial:       qf.backoffInitial,
-			Max:           qf.backoffMax,
-			Jitter:        qf.backoffJitter,
-			AbortOn:       qf.abortOn,
-			RetryOn:       qf.retryOn,
-			RetryWhen:     qf.retryWhen,
-			SuccessWhen:   qf.successWhen,
-			MaxBodyBuffer: maxBodyBuffer,
-		},
+	flags := cf.config()
+	flags.Retry = config.RetryConfig{
+		MaxRetries:    rf.retry,
+		Strategy:      strategy,
+		Initial:       rf.backoffInitial,
+		Max:           rf.backoffMax,
+		Jitter:        rf.backoffJitter,
+		AbortOn:       rf.abortOn,
+		RetryOn:       rf.retryOn,
+		RetryWhen:     rf.retryWhen,
+		SuccessWhen:   rf.successWhen,
+		MaxBodyBuffer: maxBodyBuffer,
 	}
 
 	cfg, err := config.Resolve(config.Sources{
@@ -204,26 +248,27 @@ func resolveConfig(cmd *cobra.Command, qf *requestFlags) (_ config.Config, retry
 		Env:     env,
 	})
 	if err != nil {
-		return config.Config{}, nil, nil, err
+		return config.Config{}, predicates{}, err
 	}
 
+	var p predicates
 	// Compile the predicates before resolving the password, so a bad jq
 	// expression is reported without first prompting interactively.
-	retryWhen, err = retry.CompilePredicate(cfg.Retry.RetryWhen)
+	p.retryWhen, err = retry.CompilePredicate(cfg.Retry.RetryWhen)
 	if err != nil {
-		return config.Config{}, nil, nil, fmt.Errorf("invalid --retry-when: %w", err)
+		return config.Config{}, predicates{}, fmt.Errorf("invalid --retry-when: %w", err)
 	}
-	successWhen, err = retry.CompilePredicate(cfg.Retry.SuccessWhen)
+	p.successWhen, err = retry.CompilePredicate(cfg.Retry.SuccessWhen)
 	if err != nil {
-		return config.Config{}, nil, nil, fmt.Errorf("invalid --success-when: %w", err)
+		return config.Config{}, predicates{}, fmt.Errorf("invalid --success-when: %w", err)
 	}
 
 	pw, err := config.ResolvePassword(cfg, config.TerminalPrompt(cfg.Username), isTerminal(cmd.InOrStdin()))
 	if err != nil {
-		return config.Config{}, nil, nil, err
+		return config.Config{}, predicates{}, err
 	}
 	cfg.Password = pw
-	return cfg, retryWhen, successWhen, nil
+	return cfg, p, nil
 }
 
 // parseQuery parses repeated key=value pairs into a query map.
