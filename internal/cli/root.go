@@ -1,7 +1,7 @@
 // Package cli builds the osapi command: a resilient client for OpenSearch REST
 // endpoints with configurable retry. The root command itself sends a single
 // request. There is no separate "request" subcommand. The "run" subcommand
-// instead runs a declarative multi-call runbook.
+// runs a declarative multi-call runbook, and "ism" groups the policy verbs.
 package cli
 
 import (

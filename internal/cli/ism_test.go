@@ -226,6 +226,8 @@ func TestISMSetValidation(t *testing.T) {
 			wantSub: `"policy" must be an object`},
 		{name: "ism_template string", args: []string{"set", "p", "-d", `{"policy":{"ism_template":"x"}}`},
 			wantSub: "ism_template"},
+		{name: "ism_template null", args: []string{"set", "p", "-d", `{"policy":{"ism_template":null}}`},
+			wantSub: "ism_template"},
 		{name: "id with slash", args: []string{"set", "a/b", "-d", ok}, wantSub: "a/b"},
 		{name: "empty id", args: []string{"set", "", "-d", ok}, wantSub: "must be a name"},
 		{name: "dot id", args: []string{"set", "..", "-d", ok}, wantSub: "must be a name"},

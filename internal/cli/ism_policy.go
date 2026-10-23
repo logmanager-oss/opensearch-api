@@ -134,7 +134,9 @@ func normalizePolicy(raw json.RawMessage) (map[string]json.RawMessage, error) {
 		return policy, nil
 	}
 	var entries []map[string]json.RawMessage
-	if t := bytes.TrimSpace(tmpl); len(t) > 0 && t[0] == '{' {
+	if t := bytes.TrimSpace(tmpl); bytes.Equal(t, []byte("null")) {
+		return nil, fmt.Errorf(`%w: "ism_template" must be an object or an array of objects, not null`, errPolicyBody)
+	} else if len(t) > 0 && t[0] == '{' {
 		var one map[string]json.RawMessage
 		if err := json.Unmarshal(tmpl, &one); err != nil {
 			return nil, fmt.Errorf(`%w: "ism_template": %w`, errPolicyBody, err)
