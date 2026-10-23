@@ -90,7 +90,7 @@ func explainPath(target string) (string, error) {
 
 // managedIndices lists the indices that explain at path reports as managed by id.
 func (s *ismSession) managedIndices(ctx context.Context, id, path string) ([]string, error) {
-	explain, err := s.fetch(ctx, osclient.RequestSpec{
+	explain, err := s.fetchWithoutPredicates(ctx, osclient.RequestSpec{
 		Method: http.MethodGet,
 		Path:   path,
 		Query:  map[string]string{"size": strconv.Itoa(ismExplainSize)},
@@ -111,7 +111,7 @@ func (s *ismSession) changePolicy(ctx context.Context, id string, indices []stri
 	}
 	results := make([]changePolicyResult, 0, len(indices))
 	for _, index := range indices {
-		resp, err := s.fetch(ctx, osclient.RequestSpec{
+		resp, err := s.fetchWithoutPredicates(ctx, osclient.RequestSpec{
 			Method:  http.MethodPost,
 			Path:    ismChangePolicy + "/" + index,
 			Body:    body,

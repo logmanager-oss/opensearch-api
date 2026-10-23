@@ -71,11 +71,11 @@ func (s *ismSession) do(ctx context.Context, attempt retry.Attempt) error {
 	return streamBody(s.cmd, ctx, &s.cfg, resp, doErr)
 }
 
-// fetch runs spec and returns the body. On failure it writes the body to stdout.
+// fetchWithoutPredicates runs spec and returns the body. On failure it writes the body to stdout.
 // It ignores --retry-when/--success-when, which describe the final response.
 //
 //nolint:gocritic // hugeParam: RequestSpec is the documented value-typed public API.
-func (s *ismSession) fetch(ctx context.Context, spec osclient.RequestSpec) ([]byte, error) {
+func (s *ismSession) fetchWithoutPredicates(ctx context.Context, spec osclient.RequestSpec) ([]byte, error) {
 	req, err := osclient.BuildRequest(s.cfg.Endpoint, spec)
 	if err != nil {
 		return nil, err
