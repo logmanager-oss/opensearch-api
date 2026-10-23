@@ -201,8 +201,14 @@ func doWithRetry(cmd *cobra.Command, ctx context.Context, cfg *config.Config, p 
 // It streams the body even on failure, so 4xx/5xx payloads stay visible.
 // The engine error returns unchanged for exit mapping.
 func streamBody(cmd *cobra.Command, ctx context.Context, cfg *config.Config, resp *http.Response, doErr error) error {
+	return copyBody(ctx, cfg, resp, doErr, cmd.OutOrStdout())
+}
+
+// copyBody copies resp's body to dst and closes it, then maps doErr through
+// timeoutError. A copy error only surfaces when the engine reported none.
+func copyBody(ctx context.Context, cfg *config.Config, resp *http.Response, doErr error, dst io.Writer) error {
 	if resp != nil {
-		_, copyErr := io.Copy(cmd.OutOrStdout(), resp.Body)
+		_, copyErr := io.Copy(dst, resp.Body)
 		_ = resp.Body.Close()
 		if doErr == nil && copyErr != nil {
 			doErr = fmt.Errorf("writing response body: %w", copyErr)

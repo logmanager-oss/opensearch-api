@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -79,20 +80,16 @@ func (s *ismSession) fetch(ctx context.Context, spec osclient.RequestSpec) ([]by
 	if err != nil {
 		return nil, err
 	}
-	resp, doErr := doWithRetry(s.cmd, ctx, &s.cfg, predicates{}, s.verbose, osclient.Replay(s.client, req)) //nolint:bodyclose // closed below
-	if resp == nil {
-		return nil, timeoutError(ctx, s.cfg.Timeout, doErr)
-	}
-	body, readErr := io.ReadAll(resp.Body)
-	_ = resp.Body.Close()
+	resp, doErr := doWithRetry(s.cmd, ctx, &s.cfg, predicates{}, s.verbose, osclient.Replay(s.client, req)) //nolint:bodyclose // copyBody closes it
+	var buf bytes.Buffer
+	var dst io.Writer = &buf
 	if doErr != nil {
-		_, _ = s.cmd.OutOrStdout().Write(body)
-		return nil, timeoutError(ctx, s.cfg.Timeout, doErr)
+		dst = s.cmd.OutOrStdout()
 	}
-	if readErr != nil {
-		return nil, fmt.Errorf("reading response body: %w", readErr)
+	if err := copyBody(ctx, &s.cfg, resp, doErr, dst); err != nil {
+		return nil, err
 	}
-	return body, nil
+	return buf.Bytes(), nil
 }
 
 // validName rejects an empty name, a dot segment, or one containing / ? # or %. It keeps ","
