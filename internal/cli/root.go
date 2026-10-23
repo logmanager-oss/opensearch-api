@@ -49,5 +49,6 @@ func NewRootCommand(version string) *cobra.Command {
 	registerCompletion(root, qf)
 	_ = root.MarkFlagRequired("path")
 	root.AddCommand(newRunCommand())
+	root.AddCommand(newISMCommand())
 	return root
 }
