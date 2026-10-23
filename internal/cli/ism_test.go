@@ -261,28 +261,33 @@ func TestISMFlagPosition(t *testing.T) {
 	policy := `{"policy":{"description":"d"}}`
 	tests := []struct {
 		name string
-		args func(srv *httptest.Server, envFile string) []string
+		args func(srv *httptest.Server, envFile, deadEnvFile string) []string
 	}{
-		{name: "before ism", args: func(srv *httptest.Server, _ string) []string {
+		{name: "before ism", args: func(srv *httptest.Server, _, _ string) []string {
 			return append(ismConn(srv), "-k", "ism", "set", "p", "-d", policy)
 		}},
-		{name: "between ism and verb", args: func(srv *httptest.Server, _ string) []string {
+		{name: "between ism and verb", args: func(srv *httptest.Server, _, _ string) []string {
 			return append(append([]string{"ism"}, ismConn(srv)...), "set", "p", "-d", policy)
 		}},
-		{name: "after verb", args: func(srv *httptest.Server, _ string) []string {
+		{name: "after verb", args: func(srv *httptest.Server, _, _ string) []string {
 			return append([]string{"ism", "set", "p", "-d", policy}, ismConn(srv)...)
 		}},
-		{name: "env file", args: func(_ *httptest.Server, envFile string) []string {
+		{name: "env file", args: func(_ *httptest.Server, envFile, _ string) []string {
 			return []string{"ism", "--env-file", envFile, "set", "p", "-d", policy}
+		}},
+		{name: "flag after verb beats env file", args: func(srv *httptest.Server, _, deadEnvFile string) []string {
+			return []string{"ism", "--env-file", deadEnvFile, "set", "p", "-d", policy, "--endpoint", srv.URL}
 		}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var rec capture
 			srv := newBodyServer(t, &rec, []int{http.StatusOK}, []string{getBody(`{"description":"a"}`), `{}`})
-			envFile := writeEnvFile(t, "OPENSEARCH_URL="+srv.URL+"\nOPENSEARCH_USERNAME=admin\nOPENSEARCH_PASSWORD=secret\n")
+			const creds = "OPENSEARCH_USERNAME=admin\nOPENSEARCH_PASSWORD=secret\n"
+			envFile := writeEnvFile(t, "OPENSEARCH_URL="+srv.URL+"\n"+creds)
+			deadEnvFile := writeEnvFile(t, "OPENSEARCH_URL=https://127.0.0.1:1\n"+creds)
 
-			_, _, err := run(t, nil, tt.args(srv, envFile)...)
+			_, _, err := run(t, nil, tt.args(srv, envFile, deadEnvFile)...)
 			require.NoError(t, err)
 			require.Equal(t, 2, rec.len())
 			for i := range 2 {
