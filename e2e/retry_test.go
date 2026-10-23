@@ -32,6 +32,15 @@ func TestRetry_AbortOnStopsImmediately(t *testing.T) {
 	assert.NotContains(t, res.stderr, "attempt 1")
 }
 
+func TestRetry_RetryOnStopsOnUnlistedStatus(t *testing.T) {
+	res := runOsapi(t, nil, adminArgs(
+		"--path", "/e2e-no-such-index",
+		"--retry", "5", "--retry-on", "409", "-v")...)
+	require.Equal(t, 1, res.exitCode)
+	assert.Contains(t, res.stderr, "terminal status 404")
+	assert.NotContains(t, res.stderr, "attempt 1")
+}
+
 func TestRetry_SuccessWhenNeverSatisfiedExhausts(t *testing.T) {
 	res := runOsapi(t, nil, adminArgs(
 		"--path", "/_cluster/health",

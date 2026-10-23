@@ -77,14 +77,15 @@ mapping applied to every call before its own keys are read.
 | `backoff-initial`      |          | initial backoff delay, e.g. `'2s'`                                   |
 | `backoff-max`          |          | maximum backoff delay                                                |
 | `backoff-jitter`       |          | backoff jitter as a fraction in `[0,1)`                              |
-| `abort-on`             |          | status codes that stop retrying (list)                               |
+| `abort-on`             |          | status codes that stop retrying (list); mutually exclusive with `retry-on` |
+| `retry-on`             |          | non-2xx status codes that keep retrying; any other non-2xx stops (list); mutually exclusive with `abort-on` |
 | `retry-when`           |          | jq expression; truthy forces a retry even on a `2xx`                 |
 | `success-when`         |          | jq expression; success only when truthy, regardless of status        |
 | `capture`              |          | mapping of `name: jq-expression`, extracted from a successful response |
 | `continue-on-failure`  |          | do not halt the run if this call fails; the failure is reported as tolerated |
 | `max-body-buffer`      |          | max body buffered for predicate/capture evaluation (`0` = unlimited) |
 
-Retry classification (`retry-when`, `success-when`, `abort-on`) works exactly
+Retry classification (`retry-when`, `success-when`, `abort-on`, `retry-on`) works exactly
 as for a single request — see [Retry and classification](retry.md).
 
 Durations (`backoff-initial`, `backoff-max`) and sizes (`max-body-buffer`) are
@@ -109,7 +110,8 @@ a call inherits:
    ```
 
 2. **Lists replace wholesale.** A call's own `abort-on` discards the inherited
-   list. The two lists never merge.
+   list. A call's own `retry-on` does the same to its inherited list. An
+   inherited list and a call's own list never merge.
 
    ```yaml
    defaults:
@@ -133,6 +135,20 @@ a call inherits:
        path: /my-index/_doc/1
        headers:
          Content-Type: application/x-ndjson   # wins; only one header is sent
+   ```
+
+4. **`abort-on` and `retry-on` are mutually exclusive and layer as a pair.** A
+   call's own `retry-on` drops an inherited `abort-on`. A call's own
+   `abort-on` drops an inherited `retry-on`. One mapping that sets both lists
+   is a load error that names the mapping.
+
+   ```yaml
+   defaults:
+     abort-on: [400]
+   calls:
+     - name: conflict_retry
+       path: /my-index/_doc/1
+       retry-on: [409]   # runs with no abort-on; only 409 retries, every other non-2xx is terminal
    ```
 
 ## Execution model
