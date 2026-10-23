@@ -2,6 +2,7 @@ package cli
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -492,5 +493,28 @@ func TestISMRetryFlags(t *testing.T) {
 		_, _, err := run(t, nil, ismArgs(srv, "ism", "reapply", "p", "--abort-on", "400", "--retry-on", "409")...)
 		require.Error(t, err)
 		assert.Equal(t, 0, rec.len())
+	})
+}
+
+// FuzzPolicyRoundTrip pins the invariant set relies on: what it sends must read
+// back as unchanged, with and without --target.
+func FuzzPolicyRoundTrip(f *testing.F) {
+	f.Add([]byte(`{"policy":{"description":"d","states":[]}}`))
+	f.Add([]byte(`{"policy":{"ism_template":{"index_patterns":["x*"],"priority":1,"last_updated_time":5}}}`))
+	f.Add([]byte(`{"policy":{"n":9007199254740993,"d":1.10,"s":"<&> é","policy_id":"p","user":null}}`))
+	f.Fuzz(func(t *testing.T, raw []byte) {
+		for _, targets := range [][]string{nil, {"a-*", "-b-*"}} {
+			policy, err := buildPolicy(raw, targets, 7)
+			if err != nil {
+				return
+			}
+			sent, err := marshalRaw(map[string]any{"policy": policy})
+			require.NoError(t, err)
+			for _, k := range ismServerFields {
+				assert.NotContains(t, policy, k)
+			}
+			stored := []byte(`{"_seq_no":1,"_primary_term":1,` + string(sent[1:]))
+			assert.True(t, policyUnchanged(io.Discard, "p", policy)(stored), "sent %s", sent)
+		}
 	})
 }
