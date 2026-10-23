@@ -264,9 +264,10 @@ func toleratedSuffix(call *Call) string {
 }
 
 // failureDetail extracts why the call failed: "terminal" for an abort-on
-// status, the engine's "retries exhausted[: reason]" text, or "rejected" / the
-// predicate reason for a single attempt. The reason is cut from the engine's
-// "status <code> rejected: <reason>" text, so a format change there breaks it.
+// or retry-on status, the engine's "retries exhausted[: reason]" text, or
+// "rejected" / the predicate reason for a single attempt. The reason is cut
+// from the engine's "status <code> rejected: <reason>" text, so a format change
+// there breaks it.
 func failureDetail(doErr error) string {
 	if errors.Is(doErr, retry.ErrTerminalStatus) {
 		return "terminal"

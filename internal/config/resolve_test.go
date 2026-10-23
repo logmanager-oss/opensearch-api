@@ -236,6 +236,7 @@ func TestResolveRetryFlags(t *testing.T) {
 	flags.Retry.Max = 10 * time.Second
 	flags.Retry.Jitter = 0.5
 	flags.Retry.AbortOn = []int{400, 409}
+	flags.Retry.RetryOn = []int{429, 503}
 	flags.Retry.RetryWhen = ".status == 429"
 	flags.Retry.SuccessWhen = ".ok == true"
 	flags.Retry.MaxBodyBuffer = 1024
@@ -243,7 +244,7 @@ func TestResolveRetryFlags(t *testing.T) {
 	got, err := Resolve(Sources{
 		Flags: flags,
 		Changed: changedSet(FieldRetry, FieldBackoff, FieldBackoffInitial,
-			FieldBackoffMax, FieldBackoffJitter, FieldAbortOn,
+			FieldBackoffMax, FieldBackoffJitter, FieldAbortOn, FieldRetryOn,
 			FieldRetryWhen, FieldSuccessWhen, FieldMaxBodyBuffer),
 	})
 	require.NoError(t, err)
@@ -253,6 +254,7 @@ func TestResolveRetryFlags(t *testing.T) {
 	assert.Equal(t, 10*time.Second, got.Retry.Max)
 	assert.InDelta(t, 0.5, got.Retry.Jitter, 1e-9)
 	assert.Equal(t, []int{400, 409}, got.Retry.AbortOn)
+	assert.Equal(t, []int{429, 503}, got.Retry.RetryOn)
 	assert.Equal(t, ".status == 429", got.Retry.RetryWhen)
 	assert.Equal(t, ".ok == true", got.Retry.SuccessWhen)
 	assert.Equal(t, int64(1024), got.Retry.MaxBodyBuffer)
@@ -262,16 +264,21 @@ func TestResolveClonesSlices(t *testing.T) {
 	src := []int{409}
 	flags := Defaults()
 	flags.Retry.AbortOn = src
+	retryOnSrc := []int{503}
+	flags.Retry.RetryOn = retryOnSrc
 
 	got, err := Resolve(Sources{
 		Flags:   flags,
-		Changed: changedSet(FieldAbortOn),
+		Changed: changedSet(FieldAbortOn, FieldRetryOn),
 	})
 	require.NoError(t, err)
 	require.Equal(t, []int{409}, got.Retry.AbortOn)
+	require.Equal(t, []int{503}, got.Retry.RetryOn)
 
 	got.Retry.AbortOn[0] = 999
 	assert.Equal(t, 409, src[0], "resolved slice must not alias the source")
+	got.Retry.RetryOn[0] = 999
+	assert.Equal(t, 503, retryOnSrc[0], "resolved slice must not alias the source")
 }
 
 // TestResolveWithLayeredEnvFile wires the full stack end-to-end: an env file

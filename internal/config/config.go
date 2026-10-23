@@ -61,6 +61,10 @@ type RetryConfig struct {
 	// wins over the body predicates. Empty means retry every non-2xx response.
 	// Any 2xx is always success.
 	AbortOn []int
+	// RetryOn lists the non-2xx status codes that keep retrying; any other
+	// non-2xx status is terminal. Empty means every non-2xx status retries.
+	// Mutually exclusive with AbortOn, enforced by the CLI and runbook loader.
+	RetryOn []int
 	// RetryWhen is a raw jq expression evaluated against the response body; a
 	// match triggers a retry. Compiled and evaluated by the retry layer, not
 	// internal/config.
