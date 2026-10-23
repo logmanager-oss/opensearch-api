@@ -75,7 +75,7 @@ func TestISMSetStripsServerFields(t *testing.T) {
 	for _, k := range []string{"policy_id", "last_updated_time", "user", "schema_version"} {
 		assert.NotContains(t, policy, k)
 	}
-	assert.Equal(t, `[{"name":"a","actions":[{"retry":{"count":3}}]}]`, string(policy["states"]))
+	assert.JSONEq(t, `[{"name":"a","actions":[{"retry":{"count":3}}]}]`, string(policy["states"]))
 	assert.Equal(t, `[{"index_patterns":["x*"],"priority":1}]`, string(policy["ism_template"]))
 }
 
@@ -153,10 +153,16 @@ func TestISMSetUnchanged(t *testing.T) {
 		stored   string
 		file     string
 		extra    []string
+		retries  bool
 		wantReqs int
 	}{
 		{name: "same policy sends no PUT", stored: storedPolicy, file: fileWithDescription("d"), wantReqs: 1},
 		{name: "one character differs sends PUT", stored: storedPolicy, file: fileWithDescription("e"), wantReqs: 2},
+		{
+			name: "--target equal to the stored template is unchanged", stored: storedPolicy,
+			file:  `{"policy":{"description":"d","default_state":"a","states":[]}}`,
+			extra: []string{"--target", "x*", "--priority", "1"}, wantReqs: 1,
+		},
 		{
 			name:   "integers past 2^53 compare exactly",
 			stored: `{"description":"d","priority":9007199254740993}`,
@@ -164,7 +170,7 @@ func TestISMSetUnchanged(t *testing.T) {
 		},
 		{
 			name: "unchanged is reported once across attempts", stored: storedPolicy, file: fileWithDescription("d"),
-			extra: []string{"--retry", "1", "--backoff-initial", "1ms", "--retry-when", "true"}, wantReqs: 2,
+			extra: []string{"--retry", "1", "--backoff-initial", "1ms", "--retry-when", "true"}, wantReqs: 2, retries: true,
 		},
 	}
 	for _, tt := range tests {
@@ -172,7 +178,7 @@ func TestISMSetUnchanged(t *testing.T) {
 			var rec capture
 			stored := getBody(tt.stored)
 			bodies := []string{stored, `{"put":true}`}
-			if tt.extra != nil {
+			if tt.retries {
 				bodies = []string{stored, stored} // every attempt lands on the unchanged path
 			}
 			srv := newBodyServer(t, &rec, []int{http.StatusOK}, bodies)
@@ -180,7 +186,7 @@ func TestISMSetUnchanged(t *testing.T) {
 			args := append(ismArgs(srv, "ism", "set", "p", "-d", tt.file), tt.extra...)
 			stdout, stderr, err := run(t, nil, args...)
 			require.Equal(t, tt.wantReqs, rec.len())
-			if tt.extra != nil {
+			if tt.retries {
 				require.Error(t, err)
 				assert.Equal(t, 1, strings.Count(stderr, "policy p unchanged"), stderr)
 				return
@@ -228,6 +234,10 @@ func TestISMSetValidation(t *testing.T) {
 			wantSub: "ism_template"},
 		{name: "ism_template null", args: []string{"set", "p", "-d", `{"policy":{"ism_template":null}}`},
 			wantSub: "ism_template"},
+		{name: "ism_template entry not object", args: []string{"set", "p", "-d", `{"policy":{"ism_template":[1]}}`},
+			wantSub: "ism_template"},
+		{name: "top level not object", args: []string{"set", "p", "-d", `[]`}, wantSub: "policy body"},
+		{name: "trailing data", args: []string{"set", "p", "-d", `{"policy":{}} x`}, wantSub: "after the JSON value"},
 		{name: "id with slash", args: []string{"set", "a/b", "-d", ok}, wantSub: "a/b"},
 		{name: "empty id", args: []string{"set", "", "-d", ok}, wantSub: "must be a name"},
 		{name: "dot id", args: []string{"set", "..", "-d", ok}, wantSub: "must be a name"},

@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"reflect"
+	"strconv"
 
 	"github.com/spf13/cobra"
 
@@ -80,10 +81,7 @@ func runISMSet(cmd *cobra.Command, sf *ismSetFlags, id string) error {
 
 	var unchanged func([]byte) bool
 	if !sf.force {
-		unchanged, err = policyUnchanged(cmd.ErrOrStderr(), id, policy)
-		if err != nil {
-			return err
-		}
+		unchanged = policyUnchanged(cmd.ErrOrStderr(), id, policy)
 	}
 	attempt, err := osclient.Upsert( //nolint:bodyclose // the attempt returns the response to streamBody
 		s.client, s.cfg.Endpoint, osclient.RequestSpec{
@@ -99,12 +97,16 @@ func runISMSet(cmd *cobra.Command, sf *ismSetFlags, id string) error {
 }
 
 // buildPolicy decodes the -d body, normalises its policy and applies --target.
-func buildPolicy(raw []byte, targets []string, priority int) (map[string]json.RawMessage, error) {
-	var top map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &top); err != nil {
+func buildPolicy(raw []byte, targets []string, priority int) (map[string]any, error) {
+	top, err := decodeJSON(raw)
+	if err != nil {
 		return nil, fmt.Errorf("%w: %w", errPolicyBody, err)
 	}
-	p, ok := top["policy"]
+	doc, ok := top.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("%w: must be a JSON object", errPolicyBody)
+	}
+	p, ok := doc["policy"]
 	if !ok {
 		return nil, fmt.Errorf(`%w: top-level "policy" object is required`, errPolicyBody)
 	}
@@ -113,17 +115,22 @@ func buildPolicy(raw []byte, targets []string, priority int) (map[string]json.Ra
 		return nil, err
 	}
 	if len(targets) > 0 {
-		if err := withTemplate(policy, targets, priority); err != nil {
-			return nil, err
+		// Same dynamic types as a decoded GET body, or the unchanged comparison never matches.
+		patterns := make([]any, len(targets))
+		for i, t := range targets {
+			patterns[i] = t
 		}
+		policy["ism_template"] = []any{map[string]any{
+			"index_patterns": patterns, "priority": json.Number(strconv.Itoa(priority)),
+		}}
 	}
 	return policy, nil
 }
 
 // normalizePolicy drops the server-owned fields so a policy read from GET can be written back.
-func normalizePolicy(raw json.RawMessage) (map[string]json.RawMessage, error) {
-	var policy map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &policy); err != nil || policy == nil {
+func normalizePolicy(v any) (map[string]any, error) {
+	policy, ok := v.(map[string]any)
+	if !ok {
 		return nil, fmt.Errorf(`%w: "policy" must be an object`, errPolicyBody)
 	}
 	for _, k := range ismServerFields {
@@ -133,58 +140,41 @@ func normalizePolicy(raw json.RawMessage) (map[string]json.RawMessage, error) {
 	if !ok {
 		return policy, nil
 	}
-	var entries []map[string]json.RawMessage
-	if t := bytes.TrimSpace(tmpl); bytes.Equal(t, []byte("null")) {
-		return nil, fmt.Errorf(`%w: "ism_template" must be an object or an array of objects, not null`, errPolicyBody)
-	} else if len(t) > 0 && t[0] == '{' {
-		var one map[string]json.RawMessage
-		if err := json.Unmarshal(tmpl, &one); err != nil {
-			return nil, fmt.Errorf(`%w: "ism_template": %w`, errPolicyBody, err)
-		}
-		entries = []map[string]json.RawMessage{one}
-	} else if err := json.Unmarshal(tmpl, &entries); err != nil {
-		return nil, fmt.Errorf(`%w: "ism_template" must be an object or an array of objects: %w`, errPolicyBody, err)
+	var entries []any
+	switch t := tmpl.(type) {
+	case map[string]any:
+		entries = []any{t}
+	case []any:
+		entries = t
+	default:
+		return nil, fmt.Errorf(`%w: "ism_template" must be an object or an array of objects`, errPolicyBody)
 	}
 	for _, e := range entries {
-		delete(e, "last_updated_time")
+		m, ok := e.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf(`%w: "ism_template" must be an object or an array of objects`, errPolicyBody)
+		}
+		delete(m, "last_updated_time")
 	}
-	out, err := marshalRaw(entries)
-	if err != nil {
-		return nil, err
-	}
-	policy["ism_template"] = out
+	policy["ism_template"] = entries
 	return policy, nil
-}
-
-// withTemplate replaces the policy's ism_template with one entry for targets.
-func withTemplate(policy map[string]json.RawMessage, targets []string, priority int) error {
-	out, err := marshalRaw([]map[string]any{{"index_patterns": targets, "priority": priority}})
-	if err != nil {
-		return err
-	}
-	policy["ism_template"] = out
-	return nil
 }
 
 // policyUnchanged returns the Upsert hook: true when the stored policy equals
 // want after normalising. It can only err toward "changed", never toward "unchanged".
-func policyUnchanged(stderr io.Writer, id string, want map[string]json.RawMessage) (func([]byte) bool, error) {
-	wantAny, err := toAny(want)
-	if err != nil {
-		return nil, err
-	}
+func policyUnchanged(stderr io.Writer, id string, want map[string]any) func([]byte) bool {
 	reported := false
 	return func(body []byte) bool {
-		var doc map[string]json.RawMessage
-		if json.Unmarshal(body, &doc) != nil {
-			return false
-		}
-		have, err := normalizePolicy(doc["policy"])
+		top, err := decodeJSON(body)
 		if err != nil {
 			return false
 		}
-		haveAny, err := toAny(have)
-		if err != nil || !reflect.DeepEqual(haveAny, wantAny) {
+		doc, ok := top.(map[string]any)
+		if !ok {
+			return false
+		}
+		have, err := normalizePolicy(doc["policy"])
+		if err != nil || !reflect.DeepEqual(have, want) {
 			return false
 		}
 		if !reported {
@@ -192,26 +182,25 @@ func policyUnchanged(stderr io.Writer, id string, want map[string]json.RawMessag
 			reported = true
 		}
 		return true
-	}, nil
+	}
 }
 
-// toAny re-decodes m so reflect.DeepEqual compares values, not raw bytes.
-// Numbers stay json.Number: float64 would equate integers past 2^53.
-func toAny(m map[string]json.RawMessage) (any, error) {
-	b, err := json.Marshal(m)
-	if err != nil {
-		return nil, fmt.Errorf("encoding policy: %w", err)
-	}
-	dec := json.NewDecoder(bytes.NewReader(b))
+// decodeJSON decodes with UseNumber so integers past 2^53 and decimals keep
+// their exact text through the comparison and the PUT.
+func decodeJSON(raw []byte) (any, error) {
+	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.UseNumber()
 	var out any
 	if err := dec.Decode(&out); err != nil {
-		return nil, fmt.Errorf("decoding policy: %w", err)
+		return nil, err
+	}
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		return nil, errors.New("data after the JSON value")
 	}
 	return out, nil
 }
 
-// marshalRaw marshals v without HTML escaping, so raw values stay byte-exact.
+// marshalRaw marshals v without HTML escaping, so string values stay byte-exact.
 func marshalRaw(v any) ([]byte, error) {
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
