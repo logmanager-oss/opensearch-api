@@ -11,9 +11,9 @@ key decisions were made. For what the tool *does*, read
 | Package | Responsibility |
 | ------- | -------------- |
 | [`cmd/osapi`](../cmd/osapi/) | entry point: signal handling, error printing, exit-code mapping |
-| [`internal/cli`](../internal/cli/) | cobra command tree, flag registration, shell completion, dry-run plan printing |
+| [`internal/cli`](../internal/cli/) | cobra command tree, `ism` subcommands, flag registration, shell completion, dry-run plan printing |
 | [`internal/config`](../internal/config/) | flag/env/env-file/default resolution, backoff and size parsing, password prompt |
-| [`internal/osclient`](../internal/osclient/) | `*http.Client` for one endpoint (TLS, origin-gated Basic auth) and raw request building |
+| [`internal/osclient`](../internal/osclient/) | `*http.Client` for one endpoint (TLS, origin-gated Basic auth), raw request building, and the conditional-update attempt |
 | [`internal/retry`](../internal/retry/) | the retry engine: outcome classification, backoff, compiled jq predicates |
 | [`internal/runbook`](../internal/runbook/) | YAML runbook loading/validation, execution, capture and `${name}` substitution |
 | [`internal/apispec`](../internal/apispec/) | compiled-in OpenSearch REST surface for completion and `--body-skeleton` |
@@ -98,6 +98,12 @@ Each entry: the decision, why, and where it lives.
   them, capped by `max-body-buffer`, and the buffered prefix is stitched back
   with `io.MultiReader` so stdout never sees a truncated body.
   `internal/osclient/request.go`, `internal/retry/retry.go: bufferBody`.
+- **A conditional update composes inside one Attempt.** `ism set` runs a
+  `GET` and a `PUT` as one `retry.Attempt`, so the pair has one retry budget
+  and one timeout. A `409` means the policy changed: the next attempt reads it
+  again (`internal/osclient/upsert.go`). `ism reapply` is one `explain` plus one
+  `change_policy` per index, each with its own retry budget, under one
+  timeout.
 - **Basic auth is origin-gated.** Credentials attach only when the request
   matches the configured endpoint's scheme, host, and port, so a redirect to
   another origin never receives them. Userinfo is stripped from endpoint URLs

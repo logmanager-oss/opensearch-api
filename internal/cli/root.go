@@ -1,16 +1,13 @@
 // Package cli builds the osapi command: a resilient client for OpenSearch REST
 // endpoints with configurable retry. The root command itself sends a single
 // request. There is no separate "request" subcommand. The "run" subcommand
-// instead runs a declarative multi-call runbook.
+// runs a declarative multi-call runbook, and "ism" groups the policy verbs.
 package cli
 
 import (
 	"net/http"
-	"time"
 
 	"github.com/spf13/cobra"
-
-	"github.com/logmanager-oss/opensearch-api/internal/config"
 )
 
 // NewRootCommand builds the osapi command for the given version string. Errors
@@ -34,7 +31,7 @@ func NewRootCommand(version string) *cobra.Command {
 		},
 	}
 
-	registerConnFlags(root, &qf.connFlags)
+	registerConnFlags(root.Flags(), &qf.connFlags)
 
 	f := root.Flags()
 	f.StringVarP(&qf.method, "method", "X", http.MethodGet, "HTTP method")
@@ -47,32 +44,11 @@ func NewRootCommand(version string) *cobra.Command {
 		"query parameter as key=value (repeatable)")
 	f.StringArrayVarP(&qf.header, "header", "H", nil,
 		"request header as \"Key: Value\" (repeatable)")
-	f.IntVar(&qf.retry, config.FieldRetry, 0,
-		"number of retries (0 = none; -1 = retry until success or a terminal status from --abort-on or --retry-on)")
-	f.StringVar(&qf.backoff, config.FieldBackoff, config.Linear.String(),
-		"backoff strategy between retries: constant, linear, or exponential")
-	f.DurationVar(&qf.backoffInitial, config.FieldBackoffInitial, 2*time.Second,
-		"initial backoff delay")
-	f.DurationVar(&qf.backoffMax, config.FieldBackoffMax, 30*time.Second,
-		"maximum backoff delay")
-	f.Float64Var(&qf.backoffJitter, config.FieldBackoffJitter, 0,
-		"backoff jitter as a fraction in [0,1)")
-	f.IntSliceVar(&qf.abortOn, config.FieldAbortOn, nil,
-		"status codes that stop retrying; comma-separated; only meaningful with --retry")
-	f.IntSliceVar(&qf.retryOn, config.FieldRetryOn, nil,
-		"non-2xx status codes that keep retrying; every other non-2xx stops "+
-			"(comma-separated; only meaningful with --retry; excludes --abort-on)")
-	f.StringVar(&qf.retryWhen, config.FieldRetryWhen, "",
-		"jq expression evaluated against the JSON response body; truthy forces a retry even on 2xx")
-	f.StringVar(&qf.successWhen, config.FieldSuccessWhen, "",
-		"jq expression; the response counts as success only when truthy, regardless of status")
-	f.StringVar(&qf.maxBodyBuffer, config.FieldMaxBodyBuffer, config.DefaultMaxBodyBuffer,
-		"max response body buffered for --retry-when/--success-when evaluation (e.g. 10MiB; 0 = "+
-			"unlimited); larger bodies skip predicate evaluation with a warning")
 
+	registerRetryFlags(root, f, &qf.retryFlags)
 	registerCompletion(root, qf)
 	_ = root.MarkFlagRequired("path")
-	root.MarkFlagsMutuallyExclusive(config.FieldAbortOn, config.FieldRetryOn)
 	root.AddCommand(newRunCommand())
+	root.AddCommand(newISMCommand())
 	return root
 }

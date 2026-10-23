@@ -25,6 +25,7 @@ FUZZTIME ?= 20s
 fuzz:
 	go test ./internal/config -run='^$$' -fuzz='^FuzzParseSize$$' -fuzztime=$(FUZZTIME)
 	go test ./internal/osclient -run='^$$' -fuzz='^FuzzBuildRequest$$' -fuzztime=$(FUZZTIME)
+	go test ./internal/cli -run='^$$' -fuzz='^FuzzPolicyRoundTrip$$' -fuzztime=$(FUZZTIME)
 	go test ./internal/retry -run='^$$' -fuzz='^FuzzClassify$$' -fuzztime=$(FUZZTIME)
 	go test ./internal/runbook -run='^$$' -fuzz='^FuzzScanTemplate$$' -fuzztime=$(FUZZTIME)
 	go test ./internal/runbook -run='^$$' -fuzz='^FuzzLoad$$' -fuzztime=$(FUZZTIME)

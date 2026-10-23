@@ -13,7 +13,6 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/logmanager-oss/opensearch-api/internal/config"
-	"github.com/logmanager-oss/opensearch-api/internal/osclient"
 	"github.com/logmanager-oss/opensearch-api/internal/runbook"
 )
 
@@ -50,7 +49,7 @@ func newRunCommand() *cobra.Command {
 		},
 	}
 
-	registerConnFlags(cmd, &rf.connFlags)
+	registerConnFlags(cmd.Flags(), &rf.connFlags)
 	cmd.Flags().BoolVar(&rf.dryRun, "dry-run", false,
 		"validate the runbook and print its plan without sending any request")
 
@@ -81,14 +80,7 @@ func runRun(cmd *cobra.Command, rf *runFlags, path string) error {
 		return err
 	}
 
-	client, err := osclient.New(osclient.Options{
-		Endpoint:   cfg.Endpoint,
-		Username:   cfg.Username,
-		Password:   cfg.Password,
-		CACertPath: cfg.CACertPath,
-		Insecure:   cfg.Insecure,
-		Warn:       cmd.ErrOrStderr(),
-	})
+	client, err := newClient(cmd, &cfg)
 	if err != nil {
 		return err
 	}
@@ -164,16 +156,8 @@ func loadEnv(envFile string) (config.EnvLookup, error) {
 // resolves the password, prompting only on a TTY. It mirrors resolveConfig
 // (request.go) minus the retry/predicate parts, which run lacks flags for.
 func resolveConnection(cmd *cobra.Command, cf *connFlags, env config.EnvLookup) (config.Config, error) {
-	flags := config.Config{
-		Endpoint:   cf.endpoint,
-		Username:   cf.username,
-		Password:   cf.password,
-		CACertPath: cf.caCert,
-		Insecure:   cf.insecure,
-		Timeout:    cf.timeout,
-	}
 	cfg, err := config.Resolve(config.Sources{
-		Flags:   flags,
+		Flags:   cf.config(),
 		Changed: cmd.Flags().Changed,
 		Env:     env,
 	})

@@ -90,3 +90,15 @@ func TestPredicateMatchContextCancelled(t *testing.T) {
 	require.Error(t, err)
 	assert.ErrorIs(t, err, context.Canceled)
 }
+
+func TestPredicateMatchBody(t *testing.T) {
+	p, err := CompilePredicate(".failures == false")
+	require.NoError(t, err)
+
+	got, err := p.Match(context.Background(), []byte(`{"failures":false}`))
+	require.NoError(t, err)
+	assert.True(t, got)
+
+	_, err = p.Match(context.Background(), []byte("boom"))
+	require.Error(t, err, "a non-JSON body must be an error")
+}

@@ -14,6 +14,8 @@ Why `osapi` over `curl` in a retry loop:
   predicates decide success or retry ([docs/retry.md](docs/retry.md)).
 - Declarative multi-call YAML runbooks with value capture between calls
   ([docs/runbooks.md](docs/runbooks.md)).
+- ISM policy verbs: `osapi ism set` and `osapi ism reapply` create, update
+  and re-run policies ([docs/cli.md](docs/cli.md#ism-policies-osapi-ism)).
 - Shell completion and request-body scaffolds from a pinned OpenSearch
   OpenAPI spec, compiled into the binary.
 
@@ -57,6 +59,9 @@ osapi --path _cluster/health --retry -1 --success-when '.status == "green"'
 # PUT a policy from a file, retrying up to 5 times but stopping immediately on 400
 osapi -X PUT --path _plugins/_ism/policies/my-policy \
   --body @policy.json --retry 5 --abort-on 400
+
+# Create or update an ISM policy. A 409 retries, any other non-2xx stops
+osapi ism set my-policy -d @policy.json --target 'logs-*' --retry 5 --retry-on 409
 
 # Run a declarative, multi-call runbook
 osapi run examples/index-lifecycle.yaml
