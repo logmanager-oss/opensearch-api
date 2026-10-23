@@ -89,10 +89,10 @@ Each entry: the decision, why, and where it lives.
   warnings, errors — goes to stderr, so output stays pipeable to `jq`. In
   `run` mode stdout is reserved (empty) for a future `--output`.
   `internal/cli`, `internal/runbook/run.go`.
-- **Classification order is load-bearing.** `--abort-on` (non-2xx only) beats
-  the predicates; `--retry-when` beats `--success-when` because a failure
-  indicator must win over a success gate. The order lives in one function:
-  `internal/retry/classify.go`. Documented normatively in [retry.md](retry.md).
+- **Classification order is load-bearing.** `--abort-on` and `--retry-on`
+  (non-2xx only, mutually exclusive) beat the predicates; `--retry-when` beats
+  `--success-when` because a failure indicator must win over a success gate.
+  The order lives in one function: `internal/retry/classify.go`. Documented normatively in [retry.md](retry.md).
 - **Request bodies are always fully buffered** so `req.GetBody` can replay
   them on retry. Response bodies are buffered only when a predicate needs
   them, capped by `max-body-buffer`, and the buffered prefix is stitched back

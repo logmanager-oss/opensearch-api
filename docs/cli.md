@@ -49,7 +49,8 @@ Semantics live in [Retry and classification](retry.md).
 | Flag                | Default  | Description                                                  |
 | ------------------- | -------- | ------------------------------------------------------------ |
 | `--retry`           | `0`      | number of retries (`0` = none; `-1` = unlimited)             |
-| `--abort-on`        |          | non-2xx status codes that stop retrying (comma-separated)    |
+| `--abort-on`        |          | non-2xx status codes that stop retrying (comma-separated); mutually exclusive with `--retry-on` |
+| `--retry-on`        |          | non-2xx status codes that keep retrying; any other non-2xx stops (comma-separated); mutually exclusive with `--abort-on` |
 | `--retry-when`      |          | jq expression; truthy forces a retry even on `2xx`           |
 | `--success-when`    |          | jq expression; success only when truthy, regardless of status |
 | `--max-body-buffer` | `10MiB`  | max body buffered for predicate evaluation (`0` = unlimited) |

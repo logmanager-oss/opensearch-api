@@ -16,7 +16,7 @@ import (
 
 // Sentinel errors returned by Engine.Do, wrapped with context via %w.
 var (
-	// ErrTerminalStatus is returned when a response has a terminal (abort-on) status.
+	// ErrTerminalStatus is returned when a response has a terminal (abort-on or retry-on) status.
 	ErrTerminalStatus = errors.New("terminal status")
 	// ErrRetriesExhausted is returned when the retry budget is exhausted.
 	ErrRetriesExhausted = errors.New("retries exhausted")

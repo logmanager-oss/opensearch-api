@@ -21,11 +21,12 @@ Each attempt is classified by the first matching rule, top to bottom:
 | - | --------- | ------- |
 | 1 | transport error (connection refused, TLS failure, timeout) | retry |
 | 2 | **non-2xx** status listed in `--abort-on` | terminal failure |
-| 3 | `--retry-when` is truthy | retry (even on a 2xx) |
-| 4 | `--success-when` is set and truthy | success (regardless of status) |
-| 5 | `--success-when` is set and falsy | retry (regardless of status) |
-| 6 | status is 2xx | success |
-| 7 | anything else | retry |
+| 3 | `--retry-on` is set and a **non-2xx** status is not listed in it | terminal failure |
+| 4 | `--retry-when` is truthy | retry (even on a 2xx) |
+| 5 | `--success-when` is set and truthy | success (regardless of status) |
+| 6 | `--success-when` is set and falsy | retry (regardless of status) |
+| 7 | status is 2xx | success |
+| 8 | anything else | retry |
 
 The same rules as a diagram (the table above is normative):
 
@@ -35,7 +36,9 @@ flowchart TD
     B -- yes --> R[retry]
     B -- no --> C{"non-2xx and in --abort-on?"}
     C -- yes --> T[terminal failure]
-    C -- no --> D{"--retry-when truthy?"}
+    C -- no --> C2{"--retry-on set and non-2xx not in it?"}
+    C2 -- yes --> T
+    C2 -- no --> D{"--retry-when truthy?"}
     D -- yes --> R
     D -- no --> E{"--success-when set?"}
     E -- yes --> F{truthy?}
@@ -52,6 +55,15 @@ Consequences worth spelling out:
 - A falsy `--success-when` on a `200` is a **retry**.
 - `--abort-on` beats both predicates — but only for non-2xx statuses.
   `--abort-on 200` does nothing: a 2xx can never be terminal.
+- `--retry-on` is status-only. It beats both predicates on a non-2xx status.
+  With `--retry-on 409`, a truthy `--success-when` on a `503` is terminal, not
+  a success.
+- A 2xx entry in `--retry-on` is ignored: a 2xx is never terminal. But the
+  list still applies, so `--retry-on 200` alone makes every non-2xx terminal.
+  A 2xx with a truthy `--retry-when` still retries.
+- Without `--retry-on`, rule 3 never applies.
+- `--abort-on` and `--retry-on` are mutually exclusive. On the command line,
+  `osapi` rejects both flags before it sends the request.
 - `--retry-when` beats `--success-when`: a failure indicator wins over a
   success gate.
 
@@ -105,15 +117,15 @@ The stderr error names the deciding classification rule:
 
 | Message | Meaning |
 | ------- | ------- |
-| `terminal status <code>: terminal status` | rule 2: an `--abort-on` status ended the attempt loop |
-| `status <code> rejected` | `--retry 0`: rule 7, plain non-2xx status |
-| `status <code> rejected: --retry-when matched` | `--retry 0`: rule 3 |
-| `status <code> rejected: --success-when not satisfied` | `--retry 0`: rule 5 |
+| `terminal status <code>: terminal status` | rule 2 or 3: an `--abort-on` status, or a non-2xx status outside `--retry-on`, ended the attempt loop |
+| `status <code> rejected` | `--retry 0`: rule 8, plain non-2xx status |
+| `status <code> rejected: --retry-when matched` | `--retry 0`: rule 4 |
+| `status <code> rejected: --success-when not satisfied` | `--retry 0`: rule 6 |
 | `<transport error>` | `--retry 0`: rule 1 |
-| `after <n> attempts: retries exhausted: --retry-when matched` | `--retry N`, N >= 1: rule 3 decided the final attempt |
-| `after <n> attempts: retries exhausted: --success-when not satisfied` | `--retry N`, N >= 1: rule 5 decided the final attempt |
+| `after <n> attempts: retries exhausted: --retry-when matched` | `--retry N`, N >= 1: rule 4 decided the final attempt |
+| `after <n> attempts: retries exhausted: --success-when not satisfied` | `--retry N`, N >= 1: rule 6 decided the final attempt |
 | `after <n> attempts: retries exhausted: <transport error>` | `--retry N`, N >= 1: rule 1 decided the final attempt |
-| `after <n> attempts: retries exhausted` | `--retry N`, N >= 1: rule 7 decided the final attempt |
+| `after <n> attempts: retries exhausted` | `--retry N`, N >= 1: rule 8 decided the final attempt |
 
 ## See also
 

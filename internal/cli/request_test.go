@@ -201,6 +201,34 @@ func TestRequestAbortOn(t *testing.T) {
 	assert.Equal(t, "body-409", stdout)
 }
 
+func TestRequestRetryOn(t *testing.T) {
+	var rec capture
+	srv := newServer(t, &rec, []int{http.StatusInternalServerError})
+
+	stdout, _, err := run(t, nil,
+		"--endpoint", srv.URL, "--path", "x",
+		"--retry", "5", "--retry-on", "409",
+	)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, retry.ErrTerminalStatus)
+	assert.Equal(t, 1, rec.len(), "500 is not in --retry-on, so it stops immediately")
+	assert.Equal(t, "body-500", stdout)
+}
+
+func TestRequestRetryOnExcludesAbortOn(t *testing.T) {
+	var rec capture
+	srv := newServer(t, &rec, []int{http.StatusOK})
+
+	_, _, err := run(t, nil,
+		"--endpoint", srv.URL, "--path", "x",
+		"--retry", "5", "--abort-on", "400", "--retry-on", "409",
+	)
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "abort-on")
+	assert.ErrorContains(t, err, "retry-on")
+	assert.Equal(t, 0, rec.len())
+}
+
 func TestRequestRetryReplaysBody(t *testing.T) {
 	var rec capture
 	srv := newServer(t, &rec, []int{http.StatusServiceUnavailable, http.StatusOK})

@@ -79,6 +79,7 @@ func TestDefaults(t *testing.T) {
 	assert.Equal(t, 30*time.Second, d.Retry.Max)
 	assert.Zero(t, d.Retry.Jitter)
 	assert.Nil(t, d.Retry.AbortOn)
+	assert.Nil(t, d.Retry.RetryOn)
 	assert.Empty(t, d.Retry.RetryWhen)
 	assert.Empty(t, d.Retry.SuccessWhen)
 	assert.Equal(t, int64(10*1024*1024), d.Retry.MaxBodyBuffer)

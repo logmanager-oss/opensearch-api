@@ -21,6 +21,7 @@ const (
 	FieldBackoffMax     = "backoff-max"
 	FieldBackoffJitter  = "backoff-jitter"
 	FieldAbortOn        = "abort-on"
+	FieldRetryOn        = "retry-on"
 	FieldRetryWhen      = "retry-when"
 	FieldSuccessWhen    = "success-when"
 	FieldMaxBodyBuffer  = "max-body-buffer"
@@ -113,6 +114,9 @@ func applyFlags(cfg *Config, s *Sources) {
 	}
 	if s.changed(FieldAbortOn) {
 		cfg.Retry.AbortOn = slices.Clone(f.Retry.AbortOn)
+	}
+	if s.changed(FieldRetryOn) {
+		cfg.Retry.RetryOn = slices.Clone(f.Retry.RetryOn)
 	}
 	if s.changed(FieldRetryWhen) {
 		cfg.Retry.RetryWhen = f.Retry.RetryWhen

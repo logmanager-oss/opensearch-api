@@ -47,7 +47,8 @@ const (
 // classify decides the outcome of an attempt and, when not the plain
 // status-based default, a short reason describing why. Order: a transport
 // error always retries; a non-2xx status listed in AbortOn is terminal
-// (abort-on wins over predicates); a truthy RetryWhen retries (a failure
+// (abort-on wins over predicates); a non-2xx status outside a set RetryOn is
+// terminal, also ahead of predicates; a truthy RetryWhen retries (a failure
 // indicator beats a success gate); a configured SuccessWhen decides success
 // or retry on its own truthiness; otherwise any 2xx is success and everything
 // else retries — unchanged from the no-predicate behaviour. A non-nil error
@@ -59,6 +60,9 @@ func (e *Engine) classify(ctx context.Context, status int, body []byte, overflow
 	}
 	is2xx := status >= statusOK && status < statusMultipleChoice
 	if !is2xx && slices.Contains(e.cfg.AbortOn, status) {
+		return Terminal, "", nil
+	}
+	if !is2xx && len(e.cfg.RetryOn) > 0 && !slices.Contains(e.cfg.RetryOn, status) {
 		return Terminal, "", nil
 	}
 	if e.hasPredicates() {

@@ -76,6 +76,7 @@ type requestFlags struct {
 	backoffMax     time.Duration
 	backoffJitter  float64
 	abortOn        []int
+	retryOn        []int
 	retryWhen      string
 	successWhen    string
 	maxBodyBuffer  string
@@ -190,6 +191,7 @@ func resolveConfig(cmd *cobra.Command, qf *requestFlags) (_ config.Config, retry
 			Max:           qf.backoffMax,
 			Jitter:        qf.backoffJitter,
 			AbortOn:       qf.abortOn,
+			RetryOn:       qf.retryOn,
 			RetryWhen:     qf.retryWhen,
 			SuccessWhen:   qf.successWhen,
 			MaxBodyBuffer: maxBodyBuffer,
