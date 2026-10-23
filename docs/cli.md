@@ -14,8 +14,8 @@ YAML runbook instead — see [Run files](runbooks.md).
 
 ### Connection
 
-These flags work on the root command and on `run`, on either side of the
-subcommand.
+These flags work on the root command, on `run` and on `ism`, on either side of
+the subcommand.
 
 | Flag             | Default | Description                                                      |
 | ---------------- | ------- | ---------------------------------------------------------------- |
@@ -58,6 +58,72 @@ Semantics live in [Retry and classification](retry.md).
 | `--backoff-initial` | `2s`     | initial backoff delay                                        |
 | `--backoff-max`     | `30s`    | maximum backoff delay                                        |
 | `--backoff-jitter`  | `0`      | backoff jitter as a fraction in `[0,1)`                      |
+
+## ISM policies (`osapi ism`)
+
+`osapi ism` manages Index State Management policies. It has two verbs.
+
+| Verb | Requests | stdout |
+| ---- | -------- | ------ |
+| `ism set <id>` | `GET _plugins/_ism/policies/<id>`, then a conditional `PUT` unless the policy is unchanged | the final response body: the `PUT`, or the `GET` when unchanged or when the `GET` fails |
+| `ism reapply <id>` | `GET _plugins/_ism/explain[/<target>]?size=10000`, then `POST _plugins/_ism/change_policy/<managed indices>` with `{"policy_id":"<id>"}` | the `change_policy` body, or the `explain` body when `explain` fails |
+
+| Flag | Verb | Default | Description |
+| ---- | ---- | ------- | ----------- |
+| `-d, --body` | `set` | required | policy body: literal string, `@file`, or `@-` for stdin. It needs a top-level `policy` object |
+| `--target` | `set` | | index pattern for the policy's `ism_template` (repeatable). It replaces the template in the body |
+| `--priority` | `set` | `0` | priority of the `ism_template` entry. It needs `--target` |
+| `--force` | `set` | | send the `PUT` even when the stored policy is equal |
+| `--target` | `reapply` | all managed indices | index names or patterns, comma-separated, passed through verbatim |
+
+Every flag in the Connection and Retry tables applies to both verbs. The
+request flags `--path`, `-X`, `-q`, `-H` and `--body-skeleton` do not. The
+flags may sit before `ism`, between `ism` and the verb, or after the verb.
+The `<id>` argument and the `reapply --target` value go into the request
+path. Neither may be `.` or `..`, or contain `/`, `?`, `#` or `%`. An empty
+`<id>` is an error. An empty `--target` means all managed indices.
+
+### `ism set`
+
+- `set` sends `{"policy": <policy>}`. It removes the fields the server adds:
+  `policy_id`, `last_updated_time`, `user`, `schema_version`, and
+  `last_updated_time` inside each `ism_template` entry. A `GET` body is
+  therefore valid input.
+- `set` sends an `ism_template` object as a one-element array.
+- `--target` sets `ism_template` to `[{"index_patterns": [<targets>], "priority": <n>}]`.
+- When the stored policy equals the body after the same removal, `set` sends
+  no `PUT`. It prints the `GET` body on stdout and `policy <id> unchanged` on
+  stderr, and exits `0`. `--force` sends the `PUT` anyway.
+- The comparison can report "changed" when it is not, which costs one extra
+  `PUT`. This happens when the file omits fields that ISM stores by default,
+  such as per-action `retry` and `timeout`, or `error_notification`. It never
+  reports "unchanged" when the policy differs.
+- One attempt is the `GET` and the `PUT`. The engine never sees a `GET` `404`:
+  `set` sends a plain `PUT` instead. The engine classifies every other `GET`
+  status, and the `PUT` status, like a root request. `--abort-on`,
+  `--retry-on`, `--success-when` and `--retry-when` therefore judge the
+  response that ends the attempt.
+- A `PUT` `409` is a plain non-2xx status. See
+  [Retry and classification](retry.md#classification).
+- On the unchanged path the final response is the `GET`. A `--success-when`
+  written for the `PUT` body then judges the `GET` body.
+
+### `ism reapply`
+
+- `reapply` lists the managed indices with `explain`. It sends `change_policy`
+  only for the indices whose `policy_id` equals `<id>`. An index that matches
+  `--target` but belongs to another policy keeps its policy.
+- With no managed index, `reapply` prints `no indices are managed by <id>` on
+  stderr, prints nothing on stdout, and exits `0`.
+- A 2xx `change_policy` body with `"failures": true` exits `0`. Add
+  `--success-when '.failures == false'` to make it fail. `--success-when` and
+  `--retry-when` judge only the `change_policy` response, not the `explain` call.
+- `reapply` does not page. It reads at most 10000 managed indices.
+- `explain` reflects ISM's own record of managed indices, which lags `add`,
+  `remove` and template attachment by a few seconds. Deleting a policy does not
+  detach its indices: `explain` still reports the `policy_id`, and `reapply`
+  then fails with a 404 from `change_policy`. Detach with `_plugins/_ism/remove`
+  first.
 
 ## Configuration precedence
 
@@ -161,6 +227,26 @@ a `400`:
 ```sh
 osapi -X PUT --path _plugins/_ism/policies/my-policy \
   --body @policy.json --retry 5 --abort-on 400
+```
+
+Create or update an ISM policy for `logs-*`. A `409` retries, any other
+non-2xx status stops:
+
+```sh
+osapi ism set my-policy -d @policy.json --target 'logs-*' --retry 5 --retry-on 409
+```
+
+Copy a policy to another name. `--target` gives the copy its own template, so
+it does not collide with the source's:
+
+```sh
+osapi --path _plugins/_ism/policies/my-policy | osapi ism set my-policy-copy -d @- --target 'other-*'
+```
+
+Re-run the current policy on its indices, and fail if any index fails:
+
+```sh
+osapi ism reapply my-policy --success-when '.failures == false'
 ```
 
 Read the body from stdin:

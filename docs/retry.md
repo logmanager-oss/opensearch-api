@@ -67,6 +67,12 @@ Consequences worth spelling out:
 - `--retry-when` beats `--success-when`: a failure indicator wins over a
   success gate.
 
+Under `osapi ism set`, one attempt is a `GET` and a `PUT`. The engine never
+sees a `GET` `404`: the attempt continues with the `PUT`. A `PUT` `409` is a
+plain non-2xx status. With `--retry-on 409`, a conflict retries and reads the
+policy again, any other non-2xx status stops, and attempt errors retry as
+usual. See [ISM policies](cli.md#ism-policies-osapi-ism).
+
 ## jq predicates
 
 `--retry-when` and `--success-when` are jq expressions, evaluated against the
