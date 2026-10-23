@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -45,12 +46,9 @@ func runISMReapply(cmd *cobra.Command, rf *ismReapplyFlags, id string) error {
 	if err := validName("policy id", id); err != nil {
 		return err
 	}
-	path := ismExplainPath
-	if rf.target != "" {
-		if err := validName("target", rf.target); err != nil {
-			return err
-		}
-		path += "/" + rf.target
+	path, err := explainPath(rf.target)
+	if err != nil {
+		return err
 	}
 
 	s, err := newISMSession(cmd, rf.ismFlags)
@@ -60,15 +58,7 @@ func runISMReapply(cmd *cobra.Command, rf *ismReapplyFlags, id string) error {
 	ctx, cancel := withTimeout(cmd.Context(), s.cfg.Timeout)
 	defer cancel()
 
-	explain, err := s.fetch(ctx, osclient.RequestSpec{
-		Method: http.MethodGet,
-		Path:   path,
-		Query:  map[string]string{"size": strconv.Itoa(ismExplainSize)},
-	})
-	if err != nil {
-		return err
-	}
-	indices, err := managedBy(explain, id)
+	indices, err := s.managedIndices(ctx, id, path)
 	if err != nil {
 		return err
 	}
@@ -77,9 +67,47 @@ func runISMReapply(cmd *cobra.Command, rf *ismReapplyFlags, id string) error {
 		return nil
 	}
 
-	body, err := marshalRaw(map[string]string{"policy_id": id})
+	merged, err := s.changePolicy(ctx, id, indices)
 	if err != nil {
 		return err
+	}
+	if _, err := cmd.OutOrStdout().Write(merged); err != nil {
+		return fmt.Errorf("writing merged body: %w", err)
+	}
+	return s.judge(ctx, merged)
+}
+
+// explainPath returns the explain path, scoped to target when it is set.
+func explainPath(target string) (string, error) {
+	if target == "" {
+		return ismExplainPath, nil
+	}
+	if err := validName("target", target); err != nil {
+		return "", err
+	}
+	return ismExplainPath + "/" + target, nil
+}
+
+// managedIndices lists the indices that explain at path reports as managed by id.
+func (s *ismSession) managedIndices(ctx context.Context, id, path string) ([]string, error) {
+	explain, err := s.fetch(ctx, osclient.RequestSpec{
+		Method: http.MethodGet,
+		Path:   path,
+		Query:  map[string]string{"size": strconv.Itoa(ismExplainSize)},
+	})
+	if err != nil {
+		return nil, err
+	}
+	return managedBy(explain, id)
+}
+
+// changePolicy points each index at policy id, one request per index, and
+// returns the merged response body. The first failure stops the loop with its
+// body already on stdout.
+func (s *ismSession) changePolicy(ctx context.Context, id string, indices []string) ([]byte, error) {
+	body, err := marshalRaw(map[string]string{"policy_id": id})
+	if err != nil {
+		return nil, err
 	}
 	results := make([]changePolicyResult, 0, len(indices))
 	for _, index := range indices {
@@ -90,40 +118,16 @@ func runISMReapply(cmd *cobra.Command, rf *ismReapplyFlags, id string) error {
 			HasBody: true,
 		})
 		if err != nil {
-			return fmt.Errorf("change_policy %s: %w", index, err)
+			return nil, fmt.Errorf("change_policy %s: %w", index, err)
 		}
 		var r changePolicyResult
 		if err := json.Unmarshal(resp, &r); err != nil {
-			_, _ = cmd.OutOrStdout().Write(resp)
-			return fmt.Errorf("decoding change_policy response for %s: %w", index, err)
+			_, _ = s.cmd.OutOrStdout().Write(resp)
+			return nil, fmt.Errorf("decoding change_policy response for %s: %w", index, err)
 		}
 		results = append(results, r)
 	}
-
-	merged, err := marshalRaw(mergeChangePolicy(results))
-	if err != nil {
-		return err
-	}
-	if _, err := cmd.OutOrStdout().Write(merged); err != nil {
-		return fmt.Errorf("writing merged body: %w", err)
-	}
-	if s.preds.successWhen == nil {
-		return nil
-	}
-	// Mirror the engine: a jq error warns and counts as not matched, a context
-	// error maps to the usual exit code.
-	ok, err := s.preds.successWhen.Match(ctx, merged)
-	if err != nil {
-		if ctx.Err() != nil {
-			return timeoutError(ctx, s.cfg.Timeout, err)
-		}
-		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "evaluating predicate %q: %v; treating it as not matched\n",
-			s.preds.successWhen.String(), err)
-	}
-	if !ok {
-		return fmt.Errorf("merged change_policy body %w: --success-when not satisfied", retry.ErrStatusRejected)
-	}
-	return nil
+	return marshalRaw(mergeChangePolicy(results))
 }
 
 // changePolicyResult is the part of a change_policy response that reapply merges.
@@ -133,6 +137,7 @@ type changePolicyResult struct {
 	FailedIndices  []json.RawMessage `json:"failed_indices"`
 }
 
+// mergeChangePolicy sums updated_indices, ORs failures and concatenates failed_indices.
 func mergeChangePolicy(results []changePolicyResult) changePolicyResult {
 	merged := changePolicyResult{FailedIndices: []json.RawMessage{}}
 	for _, r := range results {
@@ -141,6 +146,26 @@ func mergeChangePolicy(results []changePolicyResult) changePolicyResult {
 		merged.FailedIndices = append(merged.FailedIndices, r.FailedIndices...)
 	}
 	return merged
+}
+
+// judge applies --success-when to body once. It mirrors the engine: a jq error
+// warns and counts as not matched, a context error maps to the usual exit code.
+func (s *ismSession) judge(ctx context.Context, body []byte) error {
+	if s.preds.successWhen == nil {
+		return nil
+	}
+	ok, err := s.preds.successWhen.Match(ctx, body)
+	if err != nil {
+		if ctx.Err() != nil {
+			return timeoutError(ctx, s.cfg.Timeout, err)
+		}
+		_, _ = fmt.Fprintf(s.cmd.ErrOrStderr(), "evaluating predicate %q: %v; treating it as not matched\n",
+			s.preds.successWhen.String(), err)
+	}
+	if !ok {
+		return fmt.Errorf("merged change_policy body %w: --success-when not satisfied", retry.ErrStatusRejected)
+	}
+	return nil
 }
 
 // managedBy returns the sorted index names in an explain body whose policy_id is id.
